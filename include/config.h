@@ -7,7 +7,7 @@
 #define MOTOR_MODEL_INFO        "JGB37-520 12V 1590RPM"
 #define GEAR_REDUCTION_RATIO    6.25f                       // Gear ratio for 1590RPM variant (6.25:1)
 #define MOTOR_HALL_PPR          11.0f                       // Rotor Hall pulse count per revolution
-#define ENCODER_TICKS_PER_REV   (MOTOR_HALL_PPR * GEAR_REDUCTION_RATIO) // 68.75 ticks per wheel rev
+#define ENCODER_TICKS_PER_REV   (MOTOR_HALL_PPR * GEAR_REDUCTION_RATIO * 4.0f) // 275.0 ticks per wheel rev (4x Quadrature)
 #define WHEEL_DIAMETER_MM       68.0f                       // Wheel diameter (mm)
 #define MAX_MOTOR_RPM           1590.0f                     // Max motor RPM at 12V
 
@@ -27,13 +27,13 @@
 
 // Closed-Loop Speed Control (mm/s via Encoders)
 #define ENABLE_CLOSED_LOOP_SPEED    true                    // Set true for constant mm/s closed-loop, false for open-loop PWM
-#define TARGET_BOOST_SPEED_MMS      1200.0f                 // Rocket boost speed on confirmed straights (mm/s)
+#define TARGET_BOOST_SPEED_MMS      1400.0f                 // Rocket boost speed on confirmed straights (mm/s)
 #define TARGET_BASE_SPEED_MMS       900.0f                  // Target cruising speed on normal straights (mm/s)
 #define TARGET_CORNER_SPEED_MMS     550.0f                  // Target speed in curves / flanks (mm/s)
 #define SPEED_FF_GAIN               0.115f                  // Feedforward gain: PWM duty per mm/s
 #define FF_OFFSET_PWM               0.0f                    // Feedforward deadband offset PWM (dz)
-#define SPEED_KP_GAIN               0.18f                   // Proportional gain for speed error
-#define SPEED_KI_GAIN               0.80f                   // Integral gain for battery voltage drop compensation
+#define SPEED_KP_GAIN               0.16f                   // Proportional gain for speed error
+#define SPEED_KI_GAIN               0.75f                   // Integral gain for battery voltage drop compensation
 #define SPEED_MAX_I_PWM             40.0f                   // Anti-windup clamp for integral PWM contribution
 
 // Tuned PID for 160mm Overhang Lever Arm
@@ -43,14 +43,12 @@
 #define CONTROL_LOOP_MS         4                           // 4 ms deterministic loop (250 Hz - rock solid for 8ch MUX + encoders)
 #define SENSOR_CENTER_TRIM      0.0f                        // Fine-tune center line bias (e.g. -0.2 to shift left)
 
-// 90-Degree Pivot timing and motor constants
-#define MIN_PIVOT_TIME_MS       45                          // 45ms minimum ensures robot rotates off entry line before checking for new line
-#define MAX_PIVOT_TIME_MS       320                         // Max safety pivot timeout (ms)
-#define PIVOT_OUTER_PWM         190                         // Outer wheel speed during pivot
-#define PIVOT_INNER_PWM         -150                        // Inner wheel reverse speed during pivot
-
 // Safety Auto-Stop Timeout
 #define LINE_LOST_TIMEOUT_MS    700                         // Stop motors if line lost for >700ms
+
+// Encoder direction invert flags (swap if encoder ticks count backwards)
+#define INVERT_LEFT_ENCODER     false
+#define INVERT_RIGHT_ENCODER    false
 
 // Motor direction invert flags (swap if motor runs backward)
 #define INVERT_LEFT_MOTOR       false

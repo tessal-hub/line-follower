@@ -220,8 +220,11 @@ bool sensorsIsCalibrated() {
 
 static inline uint16_t sensorsReadFast(uint8_t ch) {
     setMuxFast(ch);
-    delayMicroseconds(10); // 10us settle time đảm bảo nạp xả tụ sạch sẽ
-    return (uint16_t)analogRead(PIN_MUX_SIG);
+    delayMicroseconds(16); // 16us settle time đảm bảo điện áp ổn định
+    (void)analogRead(PIN_MUX_SIG); // Xả tụ sample-and-hold để khử ghosting giữa các kênh
+    uint32_t s1 = analogRead(PIN_MUX_SIG);
+    uint32_t s2 = analogRead(PIN_MUX_SIG);
+    return (uint16_t)((s1 + s2) >> 1); // 2x Oversampling khử nhiễu trắng ADC và xung PWM
 }
 
 uint32_t sensorsBenchmarkLatency() {
@@ -243,7 +246,7 @@ LineDetection sensorsProcess() {
 
     uint32_t startUs = micros();
 
-    // 1. Đọc nhanh 8 kênh MUX ADC (settle 10us)
+    // 1. Đọc nhanh 8 kênh MUX ADC (settle 16us + 2x oversampling)
     uint16_t raw[8];
     for (uint8_t i = 0; i < 8; i++) {
         raw[i] = sensorsReadFast(i);
@@ -285,82 +288,84 @@ LineDetection sensorsProcess() {
         sSum += val;
     }
 
-    // 3. Phát hiện vạch ngang góc vuông 90° (T-junction / L-corner)
-    int rc = 0, lc = 0;
-    for (int i = 4; i < 8; i++) if (S[i] > 0.28f) rc++;
-    for (int i = 0; i < 4; i++) if (S[i] > 0.28f) lc++;
+    float peakContrast = sMax - sMin;
 
-    int totalActive = rc + lc;
-    if (totalActive >= 6) {
-        det.turn90 = 0; // Giao lộ chữ thập hoặc vạch đích rộng
-    } else if (rc >= 3 && lc <= 1) {
-        det.turn90 = 1; // Góc vuông phải
-    } else if (lc >= 3 && rc <= 1) {
-        det.turn90 = -1; // Góc vuông trái
-    }
+    // 3. Góc vuông 90°: Không can thiệp bẻ lái mở để tránh xoay compa sai!
+    det.turn90 = 0;
 
-    // 4. Tính trọng tâm Centroid: Position = Σ(S_i * w_i) / Σ(S_i)
-    const float S_FLOOR = 0.15f; // Trừ sàn liên tục 15% để khử nhiễu nền
+    // 4. BỘ LỌC THÍCH NGHI ĐẶC TRỊ MỌI BỀ MẶT (BÓNG / NHÁM / PHẢN QUANG):
+    // Chỉ cần có tương phản tối thiểu giữa mắt cao nhất và nền (peakContrast >= 0.06) hoặc đỉnh >= 0.16
+    bool hasLineContrast = (peakContrast >= 0.06f) || (sMax >= 0.16f);
+
+    float dynamicFloor = sMin + peakContrast * 0.20f;
+    if (dynamicFloor < 0.05f) dynamicFloor = 0.05f;
+
     float num = 0.0f;
     float den = 0.0f;
-    for (uint8_t i = 0; i < 8; i++) {
-        if (S[i] > S_FLOOR) {
-            float active = S[i] - S_FLOOR;
-            num += active * SENSOR_WEIGHTS[i];
-            den += active;
+
+    if (hasLineContrast) {
+        for (uint8_t i = 0; i < 8; i++) {
+            if (S[i] > dynamicFloor) {
+                float diff = S[i] - dynamicFloor;
+                float active = diff * diff; // Bình phương tăng cường đỉnh vạch thực, triệt tiêu phản xạ gương/chói lóa sàn bóng
+                num += active * SENSOR_WEIGHTS[i];
+                den += active;
+            }
         }
     }
 
-    if (den > 0.10f) {
+    if (hasLineContrast && den > 0.005f) {
         float rawPos = num / den;
         det.lineDetected = true;
 
-        // Nếu vạch nằm sát mép ngoài cùng và đang trượt ra biên: ngoại suy mượt mà
-        if (rawPos > 3.0f && S[7] > 0.30f && S[7] >= S[6]) {
-            det.isExtrapolated = true;
-            det.positionNorm   = SENSOR_EXTRAPOLATE_POS; // +4.25
-            det.positionMm     = SENSOR_EXTRAPOLATE_MM;  // ~ +50.39 mm
-            lastGoodLineDir    = 1;
-        } else if (rawPos < -3.0f && S[0] > 0.30f && S[0] >= S[1]) {
-            det.isExtrapolated = true;
-            det.positionNorm   = -SENSOR_EXTRAPOLATE_POS; // -4.25
-            det.positionMm     = -SENSOR_EXTRAPOLATE_MM;  // ~ -50.39 mm
-            lastGoodLineDir    = -1;
+        // Ngoại suy mượt mà liên tục ở 2 mép:
+        float edgeThresh = sMin + peakContrast * 0.30f;
+        if (rawPos >= 3.0f && S[7] > edgeThresh) {
+            float ext = constrain((S[7] - S[6] * 0.70f) / (S[7] + 0.01f), 0.0f, 1.0f);
+            float extNorm = 3.5f + 0.75f * ext;
+            det.positionNorm = (rawPos > extNorm) ? rawPos : extNorm;
+            det.isExtrapolated = (det.positionNorm > 3.6f);
+            det.positionMm   = det.positionNorm * SENSOR_PITCH_MM;
+            lastGoodLineDir  = 1;
+        } else if (rawPos <= -3.0f && S[0] > edgeThresh) {
+            float ext = constrain((S[0] - S[1] * 0.70f) / (S[0] + 0.01f), 0.0f, 1.0f);
+            float extNorm = -3.5f - 0.75f * ext;
+            det.positionNorm = (rawPos < extNorm) ? rawPos : extNorm;
+            det.isExtrapolated = (det.positionNorm < -3.6f);
+            det.positionMm   = det.positionNorm * SENSOR_PITCH_MM;
+            lastGoodLineDir  = -1;
         } else {
             det.isExtrapolated = false;
             det.positionNorm   = rawPos + SENSOR_CENTER_TRIM;
             det.positionMm     = det.positionNorm * SENSOR_PITCH_MM;
-            if (det.positionNorm > 0.80f) {
+            // CHỈ cập nhật hướng ghi nhớ khi vạch lệch hẳn ra cánh ngoài (|norm| > 1.80, tương đương > 21mm):
+            // Tuyệt đối không để rung lắc nhẹ ở tâm làm đảo lộn hướng quay khi vào góc rẽ!
+            if (det.positionNorm > 1.80f || S[7] > 0.25f) {
                 lastGoodLineDir = 1;
-            } else if (det.positionNorm < -0.80f) {
+            } else if (det.positionNorm < -1.80f || S[0] > 0.25f) {
                 lastGoodLineDir = -1;
             }
         }
 
-        // Tính Confidence ∈ [0.0, 1.0]:
-        float cPeak     = constrain((sMax - 0.20f) / 0.55f, 0.0f, 1.0f);
-        float cContrast = constrain((sMax - sMin - 0.15f) / 0.50f, 0.0f, 1.0f);
-        float cSum      = 1.0f - constrain(fabsf(sSum - 1.8f) / 2.5f, 0.0f, 1.0f);
-
-        det.confidence = constrain(cPeak * cContrast * (0.65f + 0.35f * cSum), 0.0f, 1.0f);
+        det.confidence = constrain(peakContrast / 0.40f, 0.25f, 1.0f);
         return det;
     }
 
-    // 5. Ngoại suy khẩn cấp khi line đã trượt ra ngoài thanh (den <= 0.10f):
-    if (S[7] > 0.20f && S[0] < 0.15f && S[1] < 0.15f && S[2] < 0.15f) {
+    // 5. Ngoại suy khẩn cấp khi line đã trượt ra ngoài thanh:
+    if (S[7] > 0.15f && S[7] > S[0] + 0.08f) {
         det.lineDetected   = true;
         det.isExtrapolated = true;
         det.positionNorm   = SENSOR_EXTRAPOLATE_POS;
         det.positionMm     = SENSOR_EXTRAPOLATE_MM;
-        det.confidence     = constrain(S[7] * 0.70f, 0.20f, 0.50f);
+        det.confidence     = 0.50f;
         lastGoodLineDir    = 1;
         return det;
-    } else if (S[0] > 0.20f && S[7] < 0.15f && S[6] < 0.15f && S[5] < 0.15f) {
+    } else if (S[0] > 0.15f && S[0] > S[7] + 0.08f) {
         det.lineDetected   = true;
         det.isExtrapolated = true;
         det.positionNorm   = -SENSOR_EXTRAPOLATE_POS;
         det.positionMm     = -SENSOR_EXTRAPOLATE_MM;
-        det.confidence     = constrain(S[0] * 0.70f, 0.20f, 0.50f);
+        det.confidence     = 0.50f;
         lastGoodLineDir    = -1;
         return det;
     }
@@ -384,42 +389,7 @@ float sensorsGetError(float lastKnownError, bool &lineDetected, int &turn90) {
     return lastKnownError;
 }
 
-bool sensorsIsFlankActive() {
-    bool leftFlank  = (sensorEnabled[0] && lastNormValues[0] > 300) || (sensorEnabled[1] && lastNormValues[1] > 380);
-    bool rightFlank = (sensorEnabled[7] && lastNormValues[7] > 300) || (sensorEnabled[6] && lastNormValues[6] > 380);
-    return (leftFlank || rightFlank);
-}
 
-static inline int getNormalized(uint8_t i, uint16_t raw) {
-    if (!sensorEnabled[i]) return 0;
-    int span = (int)sensorMax[i] - (int)sensorMin[i];
-    if (span < 150) return 0;
-    int norm = 0;
-    if (lineIsDark[i]) {
-        norm = (int)(((long)(sensorMax[i] - raw) * 1000) / span);
-    } else {
-        norm = (int)(((long)(raw - sensorMin[i]) * 1000) / span);
-    }
-    return constrain(norm, 0, 1000);
-}
-
-int sensorsGetCenterLine() {
-    uint16_t raw3 = sensorsReadChannel(3);
-    uint16_t raw4 = sensorsReadChannel(4);
-    int n3 = getNormalized(3, raw3);
-    int n4 = getNormalized(4, raw4);
-    return (n3 > n4) ? n3 : n4;
-}
-
-bool sensorsHasReachedCenter(bool isTurningRight) {
-    uint16_t raw3 = sensorsReadChannel(3);
-    uint16_t raw4 = sensorsReadChannel(4);
-    int n3 = getNormalized(3, raw3);
-    int n4 = getNormalized(4, raw4);
-
-    // Pivot is complete when either center sensor confirms the new line
-    return (n3 > 260 || n4 > 260);
-}
 
 void sensorsPrintDebug(float currentError) {
     Serial.print("Sensors: [");

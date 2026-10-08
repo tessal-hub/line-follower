@@ -1,20 +1,21 @@
 #include "speed_controller.h"
 #include "config.h"
 
-// [GIẢ ĐỊNH] Thông số khởi đầu cho động cơ JGB37-520 12V 1590RPM
-// Sẽ được hiệu chỉnh chính xác qua bài test Characterize ở Bước 2
+// Thông số Feedforward cho động cơ JGB37-520 12V 1590RPM
+// Đã gộp deadzone vào ks (duy nhất 1 thành phần ma sát tĩnh ~12 PWM)
+// ka đặt = 0.0f mặc định để triệt tiêu hoàn toàn nhiễu gia tốc dồn vào PWM
 static MotorFFParams ffLeft = {
-    .ks = 8.0f,
+    .ks = 12.0f,
     .kv = 0.115f,
-    .ka = 0.003f,
-    .deadzone = 12.0f
+    .ka = 0.0f,
+    .deadzone = 0.0f
 };
 
 static MotorFFParams ffRight = {
-    .ks = 8.0f,
+    .ks = 12.0f,
     .kv = 0.115f,
-    .ka = 0.003f,
-    .deadzone = 12.0f
+    .ka = 0.0f,
+    .deadzone = 0.0f
 };
 
 // PI chung cho vận tốc tịnh tiến
@@ -37,16 +38,20 @@ void speedControllerSetMotorParams(const MotorFFParams &left, const MotorFFParam
 }
 
 static float computeFeedforward(float vTarget, float aTarget, const MotorFFParams &p, float vbatScale) {
-    if (fabsf(vTarget) < 10.0f && fabsf(aTarget) < 10.0f) {
+    if (fabsf(vTarget) < 1.0f && fabsf(aTarget) < 1.0f) {
         return 0.0f;
     }
 
-    float sign = (vTarget >= 0.0f) ? 1.0f : -1.0f;
-    float ff = p.deadzone * sign + p.ks * sign + p.kv * vTarget + p.ka * aTarget;
+    // Khử triệt để hiện tượng giật bước ±20 PWM quanh v=0:
+    // Tuyến tính hóa mượt mà ma sát tĩnh trong dải [-25, +25] mm/s
+    float friction = 0.0f;
+    if (fabsf(vTarget) >= 25.0f) {
+        friction = p.ks * ((vTarget > 0.0f) ? 1.0f : -1.0f);
+    } else {
+        friction = p.ks * (vTarget / 25.0f);
+    }
 
-    // Bù sụt áp pin: PWM_ff * (V_nom / Vbat)
-    ff *= vbatScale;
-
+    float ff = (friction + p.kv * vTarget + p.ka * aTarget) * vbatScale;
     return ff;
 }
 

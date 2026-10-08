@@ -37,9 +37,9 @@ void configLoad(CarConfig &cfg) {
     carPrefs.end();
 
     // Open bounds: allows unrestricted tuning (floor limits removed)
-    cfg.boostSpeedMmS  = constrain(cfg.boostSpeedMmS,  0.0f,   2500.0f);
     cfg.baseSpeedMmS   = constrain(cfg.baseSpeedMmS,   100.0f, 2200.0f);
     cfg.cornerSpeedMmS = constrain(cfg.cornerSpeedMmS, 100.0f, 1500.0f);
+    cfg.boostSpeedMmS  = constrain(cfg.boostSpeedMmS,  cfg.baseSpeedMmS, 2500.0f);
     cfg.kpGain         = constrain(cfg.kpGain,         0.0f,   80.0f);
     cfg.kdGain         = constrain(cfg.kdGain,         0.0f,   80.0f);
     cfg.kCurveGain     = constrain(cfg.kCurveGain,     0.0f,   25.0f);

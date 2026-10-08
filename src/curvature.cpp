@@ -50,18 +50,29 @@ CurvatureOutput curvatureCompute(
 
     // 2. Tính độ cong yêu cầu kappa_cmd [m^-1]
     // Thành phần phi tuyến kCurve: khi lệch ngang |e| tăng (vào khúc cua),
-    // kCurve tự động tăng quyền lái tỉ lệ với độ lệch (|e| / 20mm) để chống thiếu lái triệt để
-    float eRatio = fabsf(errorM) / 0.020f; // 20mm là mốc chuẩn vào cua
+    // kCurve tự động tăng quyền lái tỉ lệ với độ lệch (|e| / 20mm) để chống thiếu lái
+    float absEM = fabsf(errorM);
+    float eRatio = absEM / 0.020f; // 20mm là mốc chuẩn vào cua
     float effectiveKp = kpCurvature + kCurveNonlinear * eRatio;
-    float kappa = effectiveKp * errorM + kdCurvature * filteredDeDtM;
 
-    // Trong chế độ SHARP_TURN: tăng quyền lái thêm 60% để ép đầu xe gập cua dứt khoát
     if (sharpTurnMode) {
-        kappa *= 1.60f;
+        // Cua gắt / góc 90°: Tăng vọt quyền lái tỉ lệ với độ lệch biên
+        // Khi e > 20mm, tăng quyền lái từ 1.8x lên đến 3.8x
+        float sharpMultiplier = 1.8f + 2.0f * constrain((absEM - 0.020f) / 0.025f, 0.0f, 1.0f);
+        effectiveKp *= sharpMultiplier;
     }
 
-    // Nới rộng giới hạn bán kính quay: cho phép kappa lên tới 22.0 m^-1 (R_min ~ 4.5cm)
-    // Giúp bánh trong có thể phanh đứng hoặc lùi nhẹ để xe xoay ngoắt góc 90° cực nhanh
+    float kappa = effectiveKp * errorM + kdCurvature * filteredDeDtM;
+
+    // Lực bẻ góc dứt khoát khi vạch tràn sát mép hoặc ngoại suy (absEM >= 24mm):
+    // Bơm thêm để đảm bảo kappa vượt ngưỡng 12.5 m^-1 (ngưỡng vật lý để bánh trong
+    // đảo chiều quay lùi v_inner < 0, giúp xe quay ngoắt góc 90° quanh trục bánh!)
+    if (sharpTurnMode && absEM >= 0.024f) {
+        float dir = (errorM > 0.0f) ? 1.0f : -1.0f;
+        kappa += dir * 8.0f * constrain((absEM - 0.024f) / 0.016f, 0.0f, 1.0f);
+    }
+
+    // Giới hạn vật lý độ cong kappa ∈ [-22.0, 22.0] m^-1 (R_min ~ 4.5cm)
     kappa = constrain(kappa, -22.0f, 22.0f);
     out.kappaCmd = kappa;
 
@@ -73,23 +84,24 @@ CurvatureOutput curvatureCompute(
     out.omegaCmd = omega;
 
     // 4. Phân bổ tốc độ vi sai bánh xe (Differential Kinematics)
-    // Track width B = 0.16 m (160 mm)
-    // v_left  = v - omega * B / 2  [m/s]
-    // v_right = v + omega * B / 2  [m/s]
+    // Khi vạch lệch phải (e > 0, omega > 0): Xe cần rẽ PHẢI
+    // -> Bánh trái (ngoài) phải tăng tốc: v_left = v + diffSpeed
+    // -> Bánh phải (trong) phải giảm tốc: v_right = v - diffSpeed
     float trackWidthM = (TRACK_WIDTH_MM * 0.001f);
     float diffSpeedMs = (omega * trackWidthM * 0.5f);
 
-    float vLeftMs  = vLinearMs - diffSpeedMs;
-    float vRightMs = vLinearMs + diffSpeedMs;
+    float vLeftMs  = vLinearMs + diffSpeedMs;
+    float vRightMs = vLinearMs - diffSpeedMs;
 
     float vLeftMmS  = vLeftMs * 1000.0f;
     float vRightMmS = vRightMs * 1000.0f;
 
     // 5. Giới hạn tốc độ bánh xe: nếu một bánh vượt v_wheel_max thì scale cả hai bánh theo cùng tỉ lệ
     // để BẢO TOÀN ĐỘ CONG KAPPA (không bị xén cắt méo mó góc lái!)
+    float allowedWheelMax = fmaxf(maxWheelSpeedMmS, targetSpeedMmS + 200.0f);
     float maxReq = fmaxf(fabsf(vLeftMmS), fabsf(vRightMmS));
-    if (maxReq > maxWheelSpeedMmS && maxReq > 0.001f) {
-        float scale = maxWheelSpeedMmS / maxReq;
+    if (maxReq > allowedWheelMax && maxReq > 0.001f) {
+        float scale = allowedWheelMax / maxReq;
         vLeftMmS  *= scale;
         vRightMmS *= scale;
         targetSpeedMmS *= scale;

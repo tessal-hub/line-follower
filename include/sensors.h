@@ -23,13 +23,10 @@ LineDetection sensorsProcess();
 // Hàm benchmark trễ phần cứng: trả về thời gian đọc 8 kênh MUX ADC (us)
 uint32_t sensorsBenchmarkLatency();
 
-// API tương thích ngược cho loop hiện tại
+// API tuong thich cho che do IDLE & Debug
 float sensorsGetError(float lastKnownError, bool &lineDetected, int &turn90);
 uint16_t sensorsReadChannel(uint8_t ch);
 void sensorsPrintDebug(float currentError);
 void sensorsPrintRaw();
-int sensorsGetCenterLine();
-bool sensorsHasReachedCenter(bool isTurningRight);
-bool sensorsIsFlankActive();
 int8_t sensorsGetLastGoodDir();
 void sensorsGetNormValues(int outValues[8]);
