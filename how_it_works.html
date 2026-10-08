@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 High-Speed Line Follower - Kiến Trúc Hệ Thống & Bộ Mô Phỏng Trực Quan</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --card-bg: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-title: #f0f6fc;
+            --primary: #58a6ff;
+            --accent: #2ea043;
+            --danger: #f85149;
+            --warning: #e3b341;
+            --cyan: #39c5bb;
+            --purple: #bc8cff;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+        body { background: var(--bg); color: var(--text); padding: 24px; line-height: 1.6; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1, h2, h3 { color: var(--text-title); margin-bottom: 12px; }
+        h1 { font-size: 2rem; border-bottom: 2px solid var(--border); padding-bottom: 12px; margin-bottom: 24px; display: flex; align-items: center; gap: 10px; }
+        h2 { font-size: 1.35rem; margin-top: 30px; border-left: 4px solid var(--primary); padding-left: 10px; display: flex; align-items: center; justify-content: space-between; }
+        p { margin-bottom: 14px; }
+        .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+        .badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+        .badge-danger { background: rgba(248,81,73,0.2); color: var(--danger); border: 1px solid var(--danger); }
+        .badge-success { background: rgba(46,160,67,0.2); color: var(--accent); border: 1px solid var(--accent); }
+        .badge-info { background: rgba(88,166,255,0.2); color: var(--primary); border: 1px solid var(--primary); }
+        .badge-purple { background: rgba(188,140,255,0.2); color: var(--purple); border: 1px solid var(--purple); }
+        .badge-warning { background: rgba(227,179,65,0.2); color: var(--warning); border: 1px solid var(--warning); }
+
+        /* Simulator Styles */
+        .sim-container { background: #090d13; border: 2px solid var(--primary); border-radius: 8px; padding: 20px; margin: 20px 0; }
+        .track-canvas { width: 100%; height: 170px; background: #ffffff; border-radius: 6px; position: relative; overflow: hidden; cursor: crosshair; }
+        .line-bar { position: absolute; height: 100%; background: #111; width: 40px; transform: translateX(-50%); }
+        .sensors-overlay { position: absolute; top: 50%; width: 100%; display: flex; justify-content: center; gap: 28px; transform: translateY(-50%); pointer-events: none; }
+        .sensor-dot { width: 24px; height: 24px; border-radius: 50%; border: 2px solid #555; background: #333; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: bold; color: #fff; transition: background 0.08s; }
+        
+        .controls-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-top: 18px; }
+        .stat-box { background: var(--card-bg); border: 1px solid var(--border); padding: 12px; border-radius: 6px; text-align: center; }
+        .stat-val { font-size: 1.55rem; font-weight: bold; color: var(--primary); font-family: monospace; }
+        .stat-label { font-size: 0.82rem; color: #8b949e; margin-top: 4px; }
+        
+        .slider-wrap { margin: 15px 0; }
+        .slider-wrap label { display: flex; justify-content: space-between; font-weight: bold; margin-bottom: 6px; }
+        input[type="range"] { width: 100%; height: 8px; border-radius: 4px; background: #30363d; outline: none; -webkit-appearance: none; }
+        input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: var(--primary); cursor: pointer; }
+
+        /* Virtual OLED Screen */
+        .oled-mockup { width: 290px; height: 160px; background: #000; border: 4px solid #30363d; border-radius: 8px; padding: 8px 12px; font-family: 'Courier New', monospace; color: #39c5bb; font-size: 11px; line-height: 1.35; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 0 15px rgba(57,197,187,0.25); margin: 0 auto; position: relative; }
+        .oled-header { background: #39c5bb; color: #000; padding: 2px 4px; font-weight: bold; font-size: 10px; text-align: center; border-radius: 2px; }
+        .oled-sensor-row { display: flex; justify-content: center; gap: 4px; margin: 4px 0; }
+        .oled-pixel-box { width: 12px; height: 10px; border: 1px solid #39c5bb; display: inline-block; }
+        .oled-pixel-box.active { background: #39c5bb; }
+        .oled-menu-line { padding: 1px 4px; border-radius: 2px; }
+        .oled-menu-line.selected { background: #39c5bb; color: #000; font-weight: bold; }
+        .oled-menu-line.editing { border: 1px dashed #39c5bb; background: rgba(57,197,187,0.15); color: #fff; }
+
+        /* Button Panel */
+        .btn-panel { display: flex; justify-content: center; gap: 12px; margin-top: 15px; }
+        .btn-hw { background: #21262d; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: bold; transition: all 0.15s; }
+        .btn-hw:hover { background: #30363d; border-color: var(--primary); }
+        .btn-hw:active { background: var(--primary); color: #000; }
+
+        /* Formula & Code Blocks */
+        pre, code { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; background: #0d1117; }
+        pre { padding: 14px; border-radius: 6px; border: 1px solid var(--border); overflow-x: auto; font-size: 13px; color: #79c0ff; margin-bottom: 14px; }
+        table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13.5px; }
+        th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+        th { background: #21262d; color: var(--text-title); }
+        tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 850px) { .grid-2 { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🏎️ ESP32 High-Speed Line Follower - Trạng Thái Dự Án & Mô Phỏng Trực Quan</h1>
+
+    <!-- SUMMARY OF UPGRADES -->
+    <div class="card" style="border-left: 4px solid var(--accent);">
+        <h3>⚡ Tóm Tắt Hiện Trạng Kỹ Thuật (Firmware v2.5 - Hyper-Speed Edition)</h3>
+        <p>Hệ thống xe bám line bare-metal tối ưu hóa cao độ trên nền tảng <strong>ESP32 240MHz kép (Dual-Core)</strong>:</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
+            <span class="badge badge-success">Vòng Lặp Điều Khiển 1000 Hz (1ms)</span>
+            <span class="badge badge-purple">Tối Ưu Hóa -O3 -ffast-math Xtensa LX6</span>
+            <span class="badge badge-info">Encoder Vòng Kín 200 Hz (5ms) + Lọc EMA</span>
+            <span class="badge badge-warning">Rocket Boost Đường Thẳng (1650 - 2200 mm/s)</span>
+            <span class="badge badge-danger">Phanh Động Năng ABS Động Học (Momentum-Scaled)</span>
+            <span class="badge badge-info">Velocity-Scheduled Gain (Chống Lắc Cao Tốc)</span>
+            <span class="badge badge-warning">OLED 1.3" SH1106 FreeRTOS Core 0</span>
+            <span class="badge badge-success">Menu Cài Đặt OLED 10 Mục + Flash NVS</span>
+        </div>
+    </div>
+
+    <!-- LIVE INTERACTIVE SIMULATOR -->
+    <h2>🎮 1. Bộ Mô Phỏng Điều Khiển & Màn Hình OLED (Interactive Simulator)</h2>
+    <p>Kéo thanh trượt vị trí xe để mô phỏng bám vạch, hoặc dùng 3 nút bấm vật lý ảo bên dưới để thử nghiệm <strong>Menu Cài Đặt OLED (Upgrade 2)</strong> trực tiếp:</p>
+
+    <div class="sim-container">
+        <div class="slider-wrap">
+            <label>
+                <span>Vị Trí Xe So Với Line (Độ Lệch mm):</span>
+                <span id="pos-label" style="color: var(--primary);">0.0 mm (Chính giữa vạch)</span>
+            </label>
+            <input type="range" id="car-offset" min="-70" max="70" value="0" step="1">
+        </div>
+
+        <!-- Visual Track -->
+        <div class="track-canvas" id="track-canvas">
+            <div class="line-bar" id="track-line" style="left: 50%;"></div>
+            <div class="sensors-overlay" id="sensors-overlay">
+                <!-- S0 to S7 injected by JS -->
+            </div>
+        </div>
+
+        <div class="grid-2" style="margin-top: 18px; align-items: center;">
+            <div class="controls-grid" style="margin-top: 0;">
+                <div class="stat-box">
+                    <div class="stat-val" id="disp-error">0.00</div>
+                    <div class="stat-label">Sai số vị trí (-3.5 ~ +3.5)</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-val" id="disp-speed-target" style="color: var(--warning);">1250</div>
+                    <div class="stat-label">Vận tốc gốc (Base mm/s)</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-val" id="disp-speed-actual" style="color: var(--purple);">1650</div>
+                    <div class="stat-label">Vận tốc Cruiser/Boost (mm/s)</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-val" id="disp-steer-gain" style="color: var(--primary);">1.00x</div>
+                    <div class="stat-label">Velocity Gain Scale</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-val" id="disp-speed-left" style="color: var(--accent);">1250</div>
+                    <div class="stat-label">Bánh Trái (Target L mm/s)</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-val" id="disp-speed-right" style="color: var(--cyan);">1250</div>
+                    <div class="stat-label">Bánh Phải (Target R mm/s)</div>
+                </div>
+                <div class="stat-box" style="grid-column: span 2;">
+                    <div class="stat-val" id="disp-abs-state" style="color: var(--danger); font-size: 1.15rem;">ABS SẴN SÀNG</div>
+                    <div class="stat-label">Phanh Động Năng ABS Động Học (Momentum Scaled)</div>
+                </div>
+            </div>
+
+            <!-- Virtual OLED 1.3" Mockup -->
+            <div>
+                <div class="oled-mockup" id="oled-screen">
+                    <div class="oled-header" id="oled-title">IDLE | SW2:RUN SW1:CAL</div>
+                    <div id="oled-content">
+                        <div class="oled-sensor-row" id="oled-sensor-row"></div>
+                        <div id="oled-line1">Err: +0.00   CAL:OK</div>
+                        <div id="oled-line2">L:   0 mm   R:   0 mm</div>
+                        <div id="oled-line3">Base: 1250 [Hold3:MENU]</div>
+                    </div>
+                </div>
+
+                <!-- Virtual Pushbuttons -->
+                <div class="btn-panel">
+                    <button class="btn-hw" id="btn-sw1">SW1 (Lên / + / Calib)</button>
+                    <button class="btn-hw" id="btn-sw2">SW2 (Xuống / - / Chạy)</button>
+                    <button class="btn-hw" id="btn-sw3">SW3 (Chọn / Giữ 1s: MENU)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ARCHITECTURE & SOLVED ISSUES -->
+    <h2>🧠 2. Chi Tiết Tối Ưu Hóa Tốc Độ Cực Hạn (Extreme Speed Optimizations)</h2>
+
+    <div class="grid-2">
+        <div class="card" style="border-top: 4px solid var(--purple);">
+            <h3>🚀 A. Rocket Boost Đường Thẳng (1650 - 2200 mm/s)</h3>
+            <p><strong>Cơ chế tự động:</strong> Xe phân tích quỹ đạo đường chạy trong thời gian thực. Khi duy trì xe thẳng lái (<code>|error| &lt; 0.12</code> và <code>|rate| &lt; 0.8/s</code>) liên tục trên <strong>50ms</strong>:</p>
+            <ul style="padding-left: 18px;">
+                <li><strong>Gia tốc dồn lực (+1500 mm/s²):</strong> Vận tốc tịnh tiến tự động tăng tốc mượt mà từ <code>1250 mm/s</code> lên tốc độ tên lửa <code>1650 mm/s</code> (có thể cấu hình tới 2200 mm/s trên OLED).</li>
+                <li><strong>Hạ ga tức thời khi phát hiện khúc cua:</strong> Ngay khi có dấu hiệu vào cua (<code>|error| &gt; 0.25</code> hoặc <code>|rate| &gt; 1.2/s</code>), mục tiêu vận tốc lập tức hạ ngay về <code>baseSpeedMmS</code> mà không có bất kỳ độ trễ nào.</li>
+            </ul>
+        </div>
+
+        <div class="card" style="border-top: 4px solid var(--danger);">
+            <h3>🛑 B. Phanh Động Năng ABS Động Học (Momentum-Scaled ABS)</h3>
+            <p><strong>Vấn đề vật lý:</strong> Động năng tỉ lệ với bình phương vận tốc ($E_k = \frac{1}{2} m v^2$). Ở vận tốc 1650 mm/s, động năng cao gấp <strong>1.74 lần</strong> so với 1250 mm/s. Xung phanh cố định 18ms không thể đủ sức ghìm xe vào cua hẹp!</p>
+            <ul style="padding-left: 18px;">
+                <li><strong>Tự động co giãn thời gian phanh:</strong> Thời lượng xung phanh tự thích ứng theo lượng vận tốc vượt chuẩn:
+                    <br><code>duration = constrain(16 + (speedOverBase * 0.015), 16, 28) ms</code> (lên tới 28ms ở tốc độ 2000 mm/s).
+                </li>
+                <li><strong>Tự động điều biến lực hãm PWM:</strong>
+                    <br><code>PWM = constrain(-140 - (speedOverBase * 0.05), -190, -140)</code> (lên tới -190 PWM hãm cực mạnh).
+                </li>
+                <li><strong>Xóa tích phân sai số:</strong> Reset ngay lập tức bộ tích phân PI để ngăn hiện tượng trễ bám vạch sau khi thoát khỏi cú phanh gấp.</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="grid-2">
+        <div class="card" style="border-top: 4px solid var(--primary);">
+            <h3>🎯 C. Velocity-Scheduled Steering Gain (Chống Vẫy Đuôi)</h3>
+            <p><strong>Nguyên lý:</strong> Gia tốc ly tâm tỉ lệ $a_y = \frac{v^2}{R}$. Khi xe tăng tốc lên 1650 mm/s trên đường thẳng, nếu giữ nguyên hệ số $K_p$ lái thì chỉ một sai số nhỏ sẽ làm xe lắc mạnh (hunting/weaving).</p>
+            <ul style="padding-left: 18px;">
+                <li><strong>Hệ số thích ứng theo tốc độ:</strong>
+                    <br><code>velocityScale = constrain(1200.0 / max(800.0, currentSpeed), 0.72, 1.15)</code>
+                </li>
+                <li><strong>Đường thẳng tốc độ cao (1650 mm/s):</strong> Hệ số lái tự động giảm xuống <code>0.72x</code>, giúp xe lướt thẳng tắp như mũi tên, triệt tiêu hoàn toàn rung lắc.</li>
+                <li><strong>Đường cong giảm tốc (850 mm/s):</strong> Hệ số lái tự động tăng lên <code>1.15x - 1.41x</code>, mang lại độ nhạy bẻ lái cực đại để ôm cua vuông 90°!</li>
+            </ul>
+        </div>
+
+        <div class="card" style="border-top: 4px solid var(--accent);">
+            <h3>⚡ D. Vòng Kín Encoder 200 Hz Siêu Tốc & Lọc EMA</h3>
+            <p><strong>Loại bỏ độ trễ 20ms:</strong> Trước đây encoder chỉ tính vận tốc mỗi 20ms (50 Hz), khiến 19 chu kỳ vòng lặp 1ms phải dùng dữ liệu cũ.</p>
+            <ul style="padding-left: 18px;">
+                <li><strong>Rút ngắn chu kỳ lấy mẫu xuống 5ms (200 Hz):</strong> Bộ điều khiển PI nhận phản hồi tốc độ mới sau mỗi 5ms, phát hiện trượt bánh và đáp ứng ga tức thì.</li>
+                <li><strong>Bộ lọc trung bình lũy thừa EMA (Exponential Moving Average):</strong>
+                    <br><code>speed = 0.35 * rawSpeed + 0.65 * speedPrev</code>
+                    <br>Triệt tiêu xung nhiễu lượng tử hóa tick encoder mà không làm phát sinh độ trễ pha!
+                </li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="grid-2">
+        <div class="card">
+            <h3>🎛️ E. Menu Cài Đặt OLED 10 Mục (NVS Persistence)</h3>
+            <p><strong>Cấu hình trực tiếp trên xe:</strong> Nhấn giữ <strong>SW3 1 giây</strong> ở trạng thái IDLE để mở menu:</p>
+            <ul style="padding-left: 18px;">
+                <li>1. <code>Bst  Spd</code>: 0 - 2500 mm/s (bước 50) - <em>Đã bỏ sàn</em></li>
+                <li>2. <code>Base Spd</code>: 100 - 2200 mm/s (bước 50) - <em>Đã bỏ sàn</em></li>
+                <li>3. <code>Cnr  Spd</code>: 100 - 1500 mm/s (bước 50) - <em>Đã bỏ sàn</em></li>
+                <li>4. <code>Kp Gain </code>: 0.0 - 80.0 (bước 1.0) - <em>Đã bỏ sàn</em></li>
+                <li>5. <code>Kd Gain </code>: 0.0 - 80.0 (bước 1.0) - <em>Đã bỏ sàn</em></li>
+                <li>6. <code>K-Curve </code>: 0.0 - 25.0 (bước 0.5) - <em>Đã bỏ sàn</em></li>
+                <li>7. <code>ABS Brk </code>: BẬT / TẮT (ON / OFF)</li>
+                <li>8. <code>[SAVE & EXIT]</code>: Lưu vào bộ nhớ Flash NVS</li>
+                <li>9. <code>[CANCEL]</code>: Thoát không lưu</li>
+                <li>10. <code>[RESTORE DEF]</code>: Khôi phục mặc định</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h3>🏁 F. Cua Gấp & Trợ Lực Bánh Trong Âm (-350 mm/s)</h3>
+            <ul style="padding-left: 18px;">
+                <li><strong>Mở rộng phạm vi quay lùi:</strong> Cho phép bánh phía trong quay lùi tới <code>-350 mm/s</code> khi $|error| \ge 1.3$, giúp xe xoay tâm cực nhanh khi tiếp cận cua gấp từ tốc độ cao.</li>
+                <li><strong>Tối ưu hóa cờ biên dịch <code>-O3 -ffast-math</code>:</strong> Tận dụng bộ đồng xử lý FPU phần cứng trên nhân Xtensa LX6 240MHz, toàn bộ phép tính dấu phẩy động (float) được thực thi trong 1 chu kỳ máy.</li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- HARDWARE PINOUT TABLE -->
+    <h2>🔌 3. Sơ Đồ Đấu Dây Phần Cứng (Hardware Pinout)</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>GPIO</th><th>Tên Tín Hiệu</th><th>Thiết Bị Kết Nối</th><th>Chế Độ</th><th>Ghi Chú Kỹ Thuật</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr><td><strong>18, 19</strong></td><td><code>PIN_MOTOR_LEFT</code></td><td>DRV8871 Motor Trái (IN1, IN2)</td><td>LEDC PWM</td><td>20 kHz carrier, 8-bit, Slow-Decay</td></tr>
+            <tr><td><strong>26, 25</strong></td><td><code>PIN_MOTOR_RIGHT</code></td><td>DRV8871 Motor Phải (IN1, IN2)</td><td>LEDC PWM</td><td>20 kHz carrier, 8-bit, Slow-Decay</td></tr>
+            <tr><td><strong>32, 33</strong></td><td><code>PIN_ENC_LEFT</code></td><td>Encoder Động Cơ Trái (A, B)</td><td>INPUT_PULLUP</td><td>11 PPR, Tỉ số 6.25:1 (3.107 mm/tick)</td></tr>
+            <tr><td><strong>34, 35</strong></td><td><code>PIN_ENC_RIGHT</code></td><td>Encoder Động Cơ Phải (A, B)</td><td>INPUT</td><td>Input-only (Kéo trở ngoài 4.7k-10k)</td></tr>
+            <tr><td><strong>36</strong></td><td><code>PIN_MUX_SIG</code></td><td>CD74HC4051 Analog Out (COM)</td><td>ADC1_CH0</td><td>Độ phân giải 12-bit, suy hao 11dB</td></tr>
+            <tr><td><strong>16, 17, 23</strong></td><td><code>PIN_MUX_S0, S1, S2</code></td><td>CD74HC4051 Address Pins</td><td>OUTPUT</td><td>Thao tác thanh ghi direct register (15ns)</td></tr>
+            <tr><td><strong>21</strong></td><td><code>PIN_I2C_SDA</code></td><td>Màn hình 1.3" OLED (SDA)</td><td>I2C Data</td><td>400 kHz Fast I2C (Address 0x3C)</td></tr>
+            <tr><td><strong>22</strong></td><td><code>PIN_I2C_SCL</code></td><td>Màn hình 1.3" OLED (SCL)</td><td>I2C Clock</td><td>400 kHz Fast I2C (Address 0x3C)</td></tr>
+            <tr><td><strong>13</strong></td><td><code>PIN_BTN_SW1</code></td><td>Nút nhấn SW1</td><td>INPUT_PULLUP</td><td>Chế độ Idle: Calib / Trong Menu: Lên (+) / Running: E-Stop</td></tr>
+            <tr><td><strong>14</strong></td><td><code>PIN_BTN_SW2</code></td><td>Nút nhấn SW2</td><td>INPUT_PULLUP</td><td>Chế độ Idle: Bật Chạy / Trong Menu: Xuống (-)</td></tr>
+            <tr><td><strong>27</strong></td><td><code>PIN_BTN_SW3</code></td><td>Nút nhấn SW3</td><td>INPUT_PULLUP</td><td>Bấm nhanh: Line-Hold / Giữ 1s: MENU CÀI ĐẶT OLED</td></tr>
+        </tbody>
+    </table>
+
+    <!-- PROPOSED FUTURE UPGRADES -->
+    <h2>🚀 4. Các Nâng Cấp Khả Dĩ Tiếp Theo (Next Recommended Upgrades)</h2>
+    <div class="card">
+        <ol style="padding-left: 20px;">
+            <li style="margin-bottom: 14px;">
+                <span class="badge badge-success" style="margin-right: 6px;">ĐÃ XONG - v2.4</span>
+                <strong>Menu điều chỉnh thông số trên OLED (Upgrade 2):</strong> Đã tích hợp hoàn thiện, lưu NVS Flash.
+            </li>
+            <li style="margin-bottom: 14px;">
+                <span class="badge badge-success" style="margin-right: 6px;">ĐÃ XONG - v2.4</span>
+                <strong>Phanh động năng Pre-Corner Electronic ABS (Upgrade 4):</strong> Đã tích hợp xung nghịch đảo 18ms ghìm đà vào cua.
+            </li>
+            <li style="margin-bottom: 14px;">
+                <strong>🏁 Nâng cấp 1: Nhận diện vạch ngang xuất phát/đích & Tự động ngắt phanh + Lap Timer:</strong>
+                <br>Khi cả 8 mắt cảm biến M1..M8 đồng thời phát hiện vạch đen (Crossmark), hệ thống nhận diện vạch xuất phát/đích.
+                <br><em>Lợi ích:</em> Vòng 1 bắt đầu đếm giờ; khi cán đích ở vòng 2, xe tự động kích phanh khẩn cấp dừng xe và hiển thị kết quả <code>Lap Time: X.XX giây</code> trên màn hình OLED!
+            </li>
+            <li style="margin-bottom: 14px;">
+                <strong>🏎️ Nâng cấp 2: Bản đồ đường đua học tập 2 vòng (Track Memory / Learning Lap):</strong>
+                <br>Đây là công nghệ của các xe thi đấu giải vô địch quốc tế <em>All Japan Robotrace</em>:
+                <br><em>Vòng 1 (Dò đường):</em> Xe chạy ở tốc độ an toàn (850 - 950 mm/s), ghi nhớ tọa độ khoảng cách (theo encoder) của từng đoạn thẳng và từng góc cua vào RAM.
+                <br><em>Vòng 2 (Tăng tốc tối đa):</em> Xe biết trước vị trí từng đoạn cua, tự động phóng <strong>1600 - 1800 mm/s trên đường thẳng</strong> và chủ động phanh sớm 100mm trước khi vào cua!
+            </li>
+            <li style="margin-bottom: 14px;">
+                <strong>🧭 Nâng cấp 3: Bộ lọc Kalman IMU 6 trục (MPU6050 / ICM-42688):</strong>
+                <br>Bổ sung cảm biến con quay hồi chuyển Gyroscope + Gia tốc kế Accelerometer. Đo trực tiếp vận tốc góc xoay $\omega_z$ (deg/s) và lực ly tâm ngang $a_y$ (G-force), giúp PID dự đoán trượt bánh trước khi cảm biến quang học nhận ra!
+            </li>
+            <li style="margin-bottom: 14px;">
+                <strong>📡 Nâng cấp 4: Telemetry Không Dây ESP-NOW / Web Bluetooth:</strong>
+                <br>Truyền đồ thị sai số, vận tốc thực của 2 bánh và dòng điện động cơ về điện thoại hoặc laptop trong thời gian thực qua giao thức không dây độ trễ siêu thấp (&lt; 2ms).
+            </li>
+        </ol>
+    </div>
+</div>
+
+<script>
+    // Live Parameters from firmware config
+    let config = {
+        baseSpeedMmS: 1250.0,
+        boostSpeedMmS: 1650.0,
+        cornerSpeedMmS: 850.0,
+        kpGain: 24.0,
+        kdGain: 38.0,
+        kCurveGain: 7.5,
+        activeBrakeEn: true
+    };
+
+    const SpeedFFGain = 0.115;
+    const sensorWeights = [-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5];
+    const sensorPositions = [-41.5, -29.6, -17.8, -5.9, 5.9, 17.8, 29.6, 41.5]; // mm
+    const lineWidthMm = 20.0; // 20mm tape
+
+    // Virtual UI State Machine
+    let currentMode = 'IDLE'; // 'IDLE', 'RUNNING', 'MENU'
+    let menuIndex = 0;
+    let menuIsEditing = false;
+    const menuItems = [
+        { key: 'boostSpeedMmS', name: 'Bst  Spd', step: 50, min: 0, max: 2500, unit: 'mm/s' },
+        { key: 'baseSpeedMmS', name: 'Base Spd', step: 50, min: 100, max: 2200, unit: 'mm/s' },
+        { key: 'cornerSpeedMmS', name: 'Cnr  Spd', step: 50, min: 100, max: 1500, unit: 'mm/s' },
+        { key: 'kpGain', name: 'Kp Gain', step: 1.0, min: 0, max: 80, unit: '' },
+        { key: 'kdGain', name: 'Kd Gain', step: 1.0, min: 0, max: 80, unit: '' },
+        { key: 'kCurveGain', name: 'K-Curve', step: 0.5, min: 0, max: 25, unit: '' },
+        { key: 'activeBrakeEn', name: 'ABS Brk', type: 'bool' },
+        { action: 'SAVE', name: '[SAVE & EXIT]' },
+        { action: 'CANCEL', name: '[CANCEL]' },
+        { action: 'RESET', name: '[RESTORE DEF]' }
+    ];
+
+    // Create track dots
+    const overlay = document.getElementById('sensors-overlay');
+    sensorWeights.forEach((w, i) => {
+        const dot = document.createElement('div');
+        dot.className = 'sensor-dot';
+        dot.id = 'sensor-' + i;
+        dot.innerText = 'M' + (i + 1);
+        overlay.appendChild(dot);
+    });
+
+    // Create OLED pixel boxes
+    const oledRow = document.getElementById('oled-sensor-row');
+    for (let i = 0; i < 8; i++) {
+        const box = document.createElement('div');
+        box.className = 'oled-pixel-box';
+        box.id = 'oled-box-' + i;
+        oledRow.appendChild(box);
+    }
+
+    let lastError = 0.0;
+    let sw3Timer = null;
+
+    function renderOLED() {
+        const oledTitle = document.getElementById('oled-title');
+        const oledContent = document.getElementById('oled-content');
+
+        if (currentMode === 'MENU') {
+            oledTitle.innerText = menuIsEditing ? '[EDIT] 1:+ 2:- 3:OK' : 'MENU | 1:^ 2:v 3:SEL';
+            
+            // Render 4 visible rows
+            let topIndex = Math.max(0, Math.min(menuItems.length - 4, menuIndex >= 3 ? menuIndex - 2 : 0));
+            let html = '<div style="margin-top: 4px;">';
+            for (let r = 0; r < 4; r++) {
+                let idx = topIndex + r;
+                let item = menuItems[idx];
+                let isSel = (idx === menuIndex);
+                let valStr = '';
+                if (item.key) {
+                    if (item.type === 'bool') {
+                        valStr = config[item.key] ? 'ON' : 'OFF';
+                    } else {
+                        valStr = config[item.key].toFixed(item.step < 1 ? 1 : 0);
+                    }
+                }
+                
+                let lineClass = isSel ? (menuIsEditing ? 'oled-menu-line editing' : 'oled-menu-line selected') : 'oled-menu-line';
+                let indicator = isSel ? (menuIsEditing ? '*' : '>') : '&nbsp;';
+                let displayVal = valStr ? (isSel && menuIsEditing ? `&lt;${valStr}&gt;` : valStr) : '';
+
+                html += `<div class="${lineClass}" style="display:flex; justify-content:space-between;">
+                    <span>${indicator} ${item.name}</span>
+                    <span>${displayVal}</span>
+                </div>`;
+            }
+            html += '</div>';
+            oledContent.innerHTML = html;
+        } else {
+            // Restore normal view container
+            oledContent.innerHTML = `
+                <div class="oled-sensor-row" id="oled-sensor-row"></div>
+                <div id="oled-line1">Err: +0.00   ${currentMode === 'RUNNING' ? 'TRACK' : 'CAL:OK'}</div>
+                <div id="oled-line2">Spd: L:1250  R:1250</div>
+                <div id="oled-line3">${currentMode === 'RUNNING' ? 'RUNNING | 1000Hz PI' : 'Base: ' + config.baseSpeedMmS + ' [Hold3:MENU]'}</div>
+            `;
+            // Re-bind 8 sensor boxes
+            const row = document.getElementById('oled-sensor-row');
+            for (let i = 0; i < 8; i++) {
+                const box = document.createElement('div');
+                box.className = 'oled-pixel-box';
+                box.id = 'oled-box-' + i;
+                row.appendChild(box);
+            }
+            oledTitle.innerText = currentMode === 'RUNNING' ? 'RUNNING | 1000Hz PI' : 'IDLE | SW2:RUN SW1:CAL';
+        }
+    }
+
+    function updateSim() {
+        if (currentMode === 'MENU') {
+            renderOLED();
+            return;
+        }
+
+        const offsetMm = parseFloat(document.getElementById('car-offset').value);
+        document.getElementById('pos-label').innerText = `${offsetMm.toFixed(1)} mm (${offsetMm < 0 ? 'Lệch Trái' : offsetMm > 0 ? 'Lệch Phải' : 'Chính giữa vạch'})`;
+
+        const trackWidthPx = document.getElementById('track-canvas').clientWidth;
+        const centerPx = trackWidthPx / 2;
+        const pxPerMm = trackWidthPx / 150.0;
+        const linePosPx = centerPx - (offsetMm * pxPerMm);
+        document.getElementById('track-line').style.left = `${linePosPx}px`;
+
+        let totalSum = 0;
+        let weightedSum = 0;
+        let flankActive = false;
+
+        sensorWeights.forEach((w, i) => {
+            const sensorX = sensorPositions[i];
+            const dist = Math.abs(sensorX - offsetMm);
+            let norm = 0;
+            if (dist < lineWidthMm) {
+                norm = Math.max(0, Math.round(1000 * (1 - (dist / lineWidthMm))));
+            }
+            if (norm < 120) norm = 0;
+
+            if ((i === 0 || i === 7) && norm > 400) {
+                flankActive = true;
+            }
+
+            const dot = document.getElementById('sensor-' + i);
+            const oledBox = document.getElementById('oled-box-' + i);
+
+            if (norm > 500) {
+                dot.style.background = '#2ea043';
+                dot.style.borderColor = '#3fb950';
+                if (oledBox) oledBox.className = 'oled-pixel-box active';
+            } else if (norm > 200) {
+                dot.style.background = '#d29922';
+                dot.style.borderColor = '#e3b341';
+                if (oledBox) oledBox.className = 'oled-pixel-box active';
+            } else {
+                dot.style.background = '#21262d';
+                dot.style.borderColor = '#30363d';
+                if (oledBox) oledBox.className = 'oled-pixel-box';
+            }
+
+            if (norm > 0) {
+                weightedSum += norm * w;
+                totalSum += norm;
+            }
+        });
+
+        let error = 0.0;
+        let lineDetected = (totalSum > 0);
+        if (lineDetected) {
+            error = weightedSum / totalSum;
+        } else {
+            error = (lastError >= 0) ? 3.5 : -3.5;
+        }
+
+        const absErr = Math.abs(error);
+        const rate = (error - lastError) / 0.001; // simulated rate
+
+        // Rocket Boost Straightaway calculation
+        let currentCruisingSpeedMmS = config.baseSpeedMmS;
+        let isStraight = (absErr < 0.12 && Math.abs(rate) < 0.8);
+        if (isStraight) {
+            currentCruisingSpeedMmS = config.boostSpeedMmS;
+        } else if (absErr > 0.25 || Math.abs(rate) > 1.2) {
+            currentCruisingSpeedMmS = config.baseSpeedMmS;
+        }
+
+        const cornerTaper = Math.max(0.0, Math.min(1.0, (absErr - 0.35) / 1.35));
+        let targetBaseMmS = currentCruisingSpeedMmS - cornerTaper * (currentCruisingSpeedMmS - config.cornerSpeedMmS);
+        if (flankActive) {
+            targetBaseMmS = config.cornerSpeedMmS;
+        }
+
+        // Velocity gain scheduling: 1200 / v
+        let velocityScale = Math.max(0.72, Math.min(1.15, 1200.0 / Math.max(800.0, currentCruisingSpeedMmS)));
+
+        // Dynamic Momentum-Scaled Electronic ABS
+        let speedOverBase = Math.max(0.0, currentCruisingSpeedMmS - config.baseSpeedMmS);
+        let dynamicBrakeMs = Math.round(Math.min(28, Math.max(16, 16 + speedOverBase * 0.015)));
+        let dynamicBrakePwm = Math.round(Math.max(-190, Math.min(-140, -140 - speedOverBase * 0.05)));
+
+        let absFired = false;
+        if (config.activeBrakeEn && (flankActive || (absErr >= 0.70 && Math.abs(rate) >= 2.2))) {
+            absFired = true;
+            document.getElementById('disp-abs-state').innerText = `🛑 PHANH ABS ĐANG KÍCH HOẠT (${dynamicBrakePwm} PWM, ${dynamicBrakeMs}ms)`;
+            document.getElementById('disp-abs-state').style.color = 'var(--danger)';
+        } else {
+            document.getElementById('disp-abs-state').innerText = config.activeBrakeEn ? `ABS SẴN SÀNG (BẬT | Max: ${dynamicBrakePwm} PWM, ${dynamicBrakeMs}ms)` : 'ABS ĐANG TẮT (OFF)';
+            document.getElementById('disp-abs-state').style.color = config.activeBrakeEn ? 'var(--accent)' : 'var(--warning)';
+        }
+
+        const effectiveKp = config.kpGain * velocityScale;
+        const pLinear = effectiveKp * error;
+        const pCurve  = config.kCurveGain * error * absErr;
+        const pTerm   = pLinear + pCurve;
+
+        const dTerm   = (config.kdGain * 0.05) * (error - lastError);
+        lastError = error;
+
+        const steer = pTerm + dTerm;
+        const steerSpeedMmS = steer / SpeedFFGain;
+
+        let targetLeftMmS  = targetBaseMmS + steerSpeedMmS;
+        let targetRightMmS = targetBaseMmS - steerSpeedMmS;
+
+        if (absErr < 1.3) {
+            if (targetLeftMmS < 0) targetLeftMmS = 0;
+            if (targetRightMmS < 0) targetRightMmS = 0;
+        } else {
+            targetLeftMmS  = Math.max(-350, Math.min(2400, targetLeftMmS));
+            targetRightMmS = Math.max(-350, Math.min(2400, targetRightMmS));
+        }
+
+        if (!lineDetected) {
+            targetBaseMmS = 0;
+            if (error > 0) { targetLeftMmS = 1800; targetRightMmS = -1200; }
+            else { targetLeftMmS = -1200; targetRightMmS = 1800; }
+        }
+
+        document.getElementById('disp-error').innerText = (error >= 0 ? '+' : '') + error.toFixed(2);
+        document.getElementById('disp-speed-target').innerText = Math.round(config.baseSpeedMmS);
+        document.getElementById('disp-speed-actual').innerText = Math.round(currentCruisingSpeedMmS);
+        document.getElementById('disp-steer-gain').innerText = velocityScale.toFixed(2) + 'x';
+        document.getElementById('disp-speed-left').innerText = Math.round(targetLeftMmS);
+        document.getElementById('disp-speed-right').innerText = Math.round(targetRightMmS);
+
+        const l1 = document.getElementById('oled-line1');
+        const l2 = document.getElementById('oled-line2');
+        const l3 = document.getElementById('oled-line3');
+        if (l1) l1.innerText = `Err: ${(error >= 0 ? '+' : '') + error.toFixed(2)}   ${lineDetected ? 'TRACK' : '!LOST!'}`;
+        if (l2) l2.innerText = `Spd: L:${Math.round(targetLeftMmS)}  R:${Math.round(targetRightMmS)}`;
+        if (l3) l3.innerText = currentMode === 'RUNNING' ? `Base: ${Math.round(targetBaseMmS)} mm/s` : `Base: ${config.baseSpeedMmS} [Hold3:MENU]`;
+    }
+
+    // Button SW1
+    document.getElementById('btn-sw1').addEventListener('click', () => {
+        if (currentMode === 'MENU') {
+            if (!menuIsEditing) {
+                menuIndex = (menuIndex + menuItems.length - 1) % menuItems.length;
+            } else {
+                let item = menuItems[menuIndex];
+                if (item.type === 'bool') config[item.key] = !config[item.key];
+                else if (item.key) config[item.key] = Math.min(item.max, config[item.key] + item.step);
+            }
+            renderOLED();
+        } else {
+            alert("SW1: Bắt đầu quét Calib 10s (Tự lưu NVS Flash)");
+        }
+    });
+
+    // Button SW2
+    document.getElementById('btn-sw2').addEventListener('click', () => {
+        if (currentMode === 'MENU') {
+            if (!menuIsEditing) {
+                menuIndex = (menuIndex + 1) % menuItems.length;
+            } else {
+                let item = menuItems[menuIndex];
+                if (item.type === 'bool') config[item.key] = !config[item.key];
+                else if (item.key) config[item.key] = Math.max(item.min, config[item.key] - item.step);
+            }
+            renderOLED();
+        } else {
+            currentMode = (currentMode === 'RUNNING') ? 'IDLE' : 'RUNNING';
+            renderOLED();
+            updateSim();
+        }
+    });
+
+    // Button SW3 (Hold = Menu, Click = Line Hold / Edit)
+    const btnSw3 = document.getElementById('btn-sw3');
+    btnSw3.addEventListener('mousedown', () => {
+        sw3Timer = setTimeout(() => {
+            sw3Timer = null;
+            if (currentMode === 'IDLE') {
+                currentMode = 'MENU';
+                menuIndex = 0;
+                menuIsEditing = false;
+                renderOLED();
+            }
+        }, 800); // 800ms virtual hold
+    });
+
+    btnSw3.addEventListener('mouseup', () => {
+        if (sw3Timer) {
+            clearTimeout(sw3Timer);
+            sw3Timer = null;
+            // Short click
+            if (currentMode === 'MENU') {
+                let item = menuItems[menuIndex];
+                if (item.key) {
+                    menuIsEditing = !menuIsEditing;
+                } else if (item.action === 'SAVE') {
+                    currentMode = 'IDLE';
+                    alert("Cấu hình đã lưu vào Flash NVS!");
+                } else if (item.action === 'CANCEL') {
+                    currentMode = 'IDLE';
+                } else if (item.action === 'RESET') {
+                    config = { baseSpeedMmS: 1250, boostSpeedMmS: 1650, cornerSpeedMmS: 850, kpGain: 24, kdGain: 38, kCurveGain: 7.5, activeBrakeEn: true };
+                }
+                renderOLED();
+                if (currentMode !== 'MENU') updateSim();
+            }
+        }
+    });
+
+    document.getElementById('car-offset').addEventListener('input', updateSim);
+    document.getElementById('track-canvas').addEventListener('click', (e) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const clickX = e.clientX - rect.left;
+        const centerPx = rect.width / 2;
+        const pxPerMm = rect.width / 150.0;
+        const targetOffsetMm = (centerPx - clickX) / pxPerMm;
+        document.getElementById('car-offset').value = Math.max(-70, Math.min(70, targetOffsetMm));
+        updateSim();
+    });
+
+    window.addEventListener('resize', updateSim);
+    renderOLED();
+    updateSim();
+</script>
+
+</body>
+</html>
