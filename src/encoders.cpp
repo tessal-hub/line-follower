@@ -31,6 +31,9 @@ static float rightSpeedMmS = 0.0f;
 // 275.0 ticks per wheel revolution -> ~0.7768 mm per tick
 static const float MM_PER_TICK = (3.14159265f * WHEEL_DIAMETER_MM) / ENCODER_TICKS_PER_REV;
 
+static volatile uint32_t lastLeftEdgeUs = 0;
+static volatile uint32_t lastRightEdgeUs = 0;
+
 // ISR chạy cực nhanh bằng cách đọc trực tiếp thanh ghi GPIO.in1.data của ESP32 (~15ns)
 // GPIO 32 -> bit 0, GPIO 33 -> bit 1, GPIO 34 -> bit 2, GPIO 35 -> bit 3
 // Lọc nhiễu chặt chẽ: Chỉ cập nhật trạng thái khi bước chuyển Gray hợp lệ (step != 0).
@@ -47,6 +50,7 @@ void IRAM_ATTR isrLeftEncoder() {
 #else
         leftTicks += step;
 #endif
+        lastLeftEdgeUs = micros();
         lastLeftState = curr;
     }
 }
@@ -63,6 +67,7 @@ void IRAM_ATTR isrRightEncoder() {
 #else
         rightTicks += step;
 #endif
+        lastRightEdgeUs = micros();
         lastRightState = curr;
     }
 }
@@ -135,6 +140,8 @@ void encodersUpdateSpeed() {
     noInterrupts();
     int32_t cl = leftTicks;
     int32_t cr = rightTicks;
+    uint32_t lastLEdge = lastLeftEdgeUs;
+    uint32_t lastREdge = lastRightEdgeUs;
     interrupts();
 
     uint32_t t0 = histT[hIdx];
@@ -153,9 +160,14 @@ void encodersUpdateSpeed() {
     float rawSpeedL = (float)(cl - l0) * MM_PER_TICK / dt;
     float rawSpeedR = (float)(cr - r0) * MM_PER_TICK / dt;
 
-    // Bộ lọc thông thấp EMA (alpha = 0.50): triệt tiêu hoàn toàn rung lượng tử hóa
-    leftSpeedMmS  = 0.50f * rawSpeedL + 0.50f * leftSpeedMmS;
-    rightSpeedMmS = 0.50f * rawSpeedR + 0.50f * rightSpeedMmS;
+    // Nếu không có xung cạnh nào trong 40ms (> 0.04s, tương đương tốc độ < 20 mm/s),
+    // kết luận bánh xe đã dừng hẳn hoặc đổi chiều, xả tốc độ về 0 ngay lập tức:
+    if (t - lastLEdge > 40000) rawSpeedL = 0.0f;
+    if (t - lastREdge > 40000) rawSpeedR = 0.0f;
+
+    // Bộ lọc thông thấp EMA (alpha = 0.45): triệt tiêu hoàn toàn rung lượng tử hóa
+    leftSpeedMmS  = 0.45f * rawSpeedL + 0.55f * leftSpeedMmS;
+    rightSpeedMmS = 0.45f * rawSpeedR + 0.55f * rightSpeedMmS;
 }
 
 float encodersGetLeftSpeedMmS() {

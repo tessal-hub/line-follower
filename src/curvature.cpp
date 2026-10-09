@@ -62,7 +62,15 @@ CurvatureOutput curvatureCompute(
         effectiveKp *= sharpMultiplier;
     }
 
-    float kappa = effectiveKp * errorM + kdCurvature * filteredDeDtM;
+    // Chuẩn hóa độ lợi bám line theo bình phương tốc độ: (v_ref / v)^2 khi v > v_ref (900 mm/s)
+    // để giữ ổn định hệ dao động ngang (ay ~ v^2 * kappa), triệt tiêu hoàn toàn hiện tượng
+    // xe bị lắc đuôi hoặc văng vạch khi tốc độ bung lên 1100 - 1400 mm/s!
+    float vRefMmS = 900.0f;
+    float vNormMmS = fmaxf(targetSpeedMmS, vRefMmS);
+    float speedGainScale = (vRefMmS / vNormMmS) * (vRefMmS / vNormMmS);
+    speedGainScale = constrain(speedGainScale, 0.35f, 1.0f);
+
+    float kappa = (effectiveKp * errorM + kdCurvature * filteredDeDtM) * speedGainScale;
 
     // Lực bẻ góc dứt khoát khi vạch tràn sát mép hoặc ngoại suy (absEM >= 24mm):
     // Bơm thêm để đảm bảo kappa vượt ngưỡng 12.5 m^-1 (ngưỡng vật lý để bánh trong

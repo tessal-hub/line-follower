@@ -10,6 +10,7 @@
 #define ENCODER_TICKS_PER_REV   (MOTOR_HALL_PPR * GEAR_REDUCTION_RATIO * 4.0f) // 275.0 ticks per wheel rev (4x Quadrature)
 #define WHEEL_DIAMETER_MM       68.0f                       // Wheel diameter (mm)
 #define MAX_MOTOR_RPM           1590.0f                     // Max motor RPM at 12V
+#define MAX_WHEEL_SPEED_MMS     2200.0f                     // Physical motor wheel speed ceiling at 12V 100% PWM (~2200 mm/s)
 
 // Chassis Geometry (mm)
 #define SENSOR_BAR_WIDTH_MM     83.0f                       // 83mm sensor bar span (center Ch0 to center Ch7)
@@ -27,7 +28,7 @@
 
 // Closed-Loop Speed Control (mm/s via Encoders)
 #define ENABLE_CLOSED_LOOP_SPEED    true                    // Set true for constant mm/s closed-loop, false for open-loop PWM
-#define TARGET_BOOST_SPEED_MMS      1400.0f                 // Rocket boost speed on confirmed straights (mm/s)
+#define TARGET_BOOST_SPEED_MMS      1100.0f                 // Rocket boost speed on confirmed straights (mm/s) - khoi dau an toan, tang dan qua OLED
 #define TARGET_BASE_SPEED_MMS       900.0f                  // Target cruising speed on normal straights (mm/s)
 #define TARGET_CORNER_SPEED_MMS     550.0f                  // Target speed in curves / flanks (mm/s)
 #define SPEED_FF_GAIN               0.115f                  // Feedforward gain: PWM duty per mm/s
@@ -36,9 +37,9 @@
 #define SPEED_KI_GAIN               0.75f                   // Integral gain for battery voltage drop compensation
 #define SPEED_MAX_I_PWM             40.0f                   // Anti-windup clamp for integral PWM contribution
 
-// Tuned PID for 160mm Overhang Lever Arm
-#define KP_GAIN                 20.0f                       // Proportional gain for linear tracking
-#define KD_GAIN                 68.0f                       // Angular rate damping to prevent whip across center
+// Tuned PID for 160mm Overhang Lever Arm (Pure Pursuit geometric scale Kp ~ 2/L^2 = 78 m^-2)
+#define KP_GAIN                 45.0f                       // Pure Pursuit curvature gain (40.0 - 60.0 m^-2)
+#define KD_GAIN                 92.0f                       // Angular rate damping to prevent whip across center (damping ratio ~ Kd/sqrt(Kp))
 #define K_CURVE_GAIN            14.5f                       // Progressive cornering boost to prevent understeer at corner entry
 #define CONTROL_LOOP_MS         4                           // 4 ms deterministic loop (250 Hz - rock solid for 8ch MUX + encoders)
 #define SENSOR_CENTER_TRIM      0.0f                        // Fine-tune center line bias (e.g. -0.2 to shift left)
@@ -126,13 +127,29 @@ struct CarConfig {
     float boostSpeedMmS;   // 1200 - 2200 (step 50) - Rocket boost on straight track
     float baseSpeedMmS;    // 800 - 1800 (step 50)  - Normal cruising speed
     float cornerSpeedMmS;  // 600 - 1200 (step 50)  - Safe corner entry speed
-    float kpGain;          // 10.0 - 50.0 (step 1.0)
-    float kdGain;          // 10.0 - 70.0 (step 1.0)
-    float kCurveGain;      // 1.0 - 15.0 (step 0.5)
+    float kpGain;          // 0.0 - 100.0 (step 1.0)
+    float kdGain;          // 0.0 - 150.0 (step 1.0)
+    float kCurveGain;      // 0.0 - 30.0 (step 0.5)
     bool  activeBrakeEn;   // true / false (Electronic ABS)
 };
 
 void configLoad(CarConfig &cfg);
 void configSave(const CarConfig &cfg);
 void configResetDefaults(CarConfig &cfg);
+
+// ==========================================
+// 6. Menu & Tuning Parameter Bounds
+// ==========================================
+#define CFG_BOOST_SPD_MIN       1000.0f
+#define CFG_BOOST_SPD_MAX       2500.0f
+#define CFG_BASE_SPD_MIN        200.0f
+#define CFG_BASE_SPD_MAX        2200.0f
+#define CFG_CORNER_SPD_MIN      200.0f
+#define CFG_CORNER_SPD_MAX      1500.0f
+#define CFG_KP_MIN              0.0f
+#define CFG_KP_MAX              100.0f
+#define CFG_KD_MIN              0.0f
+#define CFG_KD_MAX              150.0f
+#define CFG_KC_MIN              0.0f
+#define CFG_KC_MAX              30.0f
 

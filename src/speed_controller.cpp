@@ -2,19 +2,19 @@
 #include "config.h"
 
 // Thông số Feedforward cho động cơ JGB37-520 12V 1590RPM
-// Đã gộp deadzone vào ks (duy nhất 1 thành phần ma sát tĩnh ~12 PWM)
-// ka đặt = 0.0f mặc định để triệt tiêu hoàn toàn nhiễu gia tốc dồn vào PWM
+// Đã gộp deadzone vào ks (duy nhất 1 thành phần ma sát tĩnh ~12 PWM, mượt mà trong dải ±25 mm/s)
+// ka = 0.002f kết hợp cùng Slew Limiter giúp tăng tốc dứt khoát mà không sinh nhiễu bang-bang
 static MotorFFParams ffLeft = {
-    .ks = 12.0f,
+    .ks = 15.0f,
     .kv = 0.115f,
-    .ka = 0.0f,
+    .ka = 0.002f,
     .deadzone = 0.0f
 };
 
 static MotorFFParams ffRight = {
-    .ks = 12.0f,
+    .ks = 15.0f,
     .kv = 0.115f,
-    .ka = 0.0f,
+    .ka = 0.002f,
     .deadzone = 0.0f
 };
 

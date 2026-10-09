@@ -291,7 +291,6 @@ static void drawPopup(const char *title, const char *msg) {
 }
 
 static void drawMenu(const MenuDisplayData &menu) {
-    const int TOTAL_MENU_ITEMS = 10;
     const int VISIBLE_ROWS = 4;
 
     // Inverted Top Header Bar
@@ -330,42 +329,45 @@ static void drawMenu(const MenuDisplayData &menu) {
         valBuf[0] = '\0';
 
         switch (itemIdx) {
-            case 0:
+            case MENU_ITEM_BOOST_SPD:
                 snprintf(nameBuf, sizeof(nameBuf), "Bst  Spd");
                 snprintf(valBuf, sizeof(valBuf), "%4.0f", menu.boostSpeedMmS);
                 break;
-            case 1:
+            case MENU_ITEM_BASE_SPD:
                 snprintf(nameBuf, sizeof(nameBuf), "Base Spd");
                 snprintf(valBuf, sizeof(valBuf), "%4.0f", menu.baseSpeedMmS);
                 break;
-            case 2:
+            case MENU_ITEM_CORNER_SPD:
                 snprintf(nameBuf, sizeof(nameBuf), "Cnr  Spd");
                 snprintf(valBuf, sizeof(valBuf), "%4.0f", menu.cornerSpeedMmS);
                 break;
-            case 3:
+            case MENU_ITEM_KP_GAIN:
                 snprintf(nameBuf, sizeof(nameBuf), "Kp Gain");
                 snprintf(valBuf, sizeof(valBuf), "%4.1f", menu.kpGain);
                 break;
-            case 4:
+            case MENU_ITEM_KD_GAIN:
                 snprintf(nameBuf, sizeof(nameBuf), "Kd Gain");
                 snprintf(valBuf, sizeof(valBuf), "%4.1f", menu.kdGain);
                 break;
-            case 5:
+            case MENU_ITEM_KC_GAIN:
                 snprintf(nameBuf, sizeof(nameBuf), "K-Curve");
                 snprintf(valBuf, sizeof(valBuf), "%4.1f", menu.kCurveGain);
                 break;
-            case 6:
+            case MENU_ITEM_ACTIVE_BRAKE:
                 snprintf(nameBuf, sizeof(nameBuf), "ABS Brk");
                 snprintf(valBuf, sizeof(valBuf), "%s", menu.activeBrakeEn ? "ON" : "OFF");
                 break;
-            case 7:
+            case MENU_ITEM_SAVE_EXIT:
                 snprintf(nameBuf, sizeof(nameBuf), "[SAVE & EXIT]");
                 break;
-            case 8:
+            case MENU_ITEM_CANCEL:
                 snprintf(nameBuf, sizeof(nameBuf), "[CANCEL]");
                 break;
-            case 9:
+            case MENU_ITEM_RESTORE_DEF:
                 snprintf(nameBuf, sizeof(nameBuf), "[RESTORE DEF]");
+                break;
+            case MENU_ITEM_TEST_LINE_HOLD:
+                snprintf(nameBuf, sizeof(nameBuf), "[TEST LINE-HOLD]");
                 break;
         }
 
@@ -466,10 +468,10 @@ void displayInit() {
     xTaskCreatePinnedToCore(
         oledCore0Task,      // Task function
         "OledCore0Task",    // Name of task
-        4096,               // Stack size in bytes
+        8192,               // Stack size in bytes (tăng lên 8192 chống tràn stack do snprintf float & U8g2)
         NULL,               // Parameters
         1,                  // Low priority (1)
         &oledTaskHandle,    // Task handle
-        0                   // Core 0 (Protects Core 1 1000Hz real-time loop!)
+        0                   // Core 0 (Protects Core 1 250Hz real-time loop!)
     );
 }

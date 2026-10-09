@@ -9,6 +9,22 @@ enum DisplayMode {
     DISP_MODE_MENU = 4
 };
 
+#define TOTAL_MENU_ITEMS 11
+
+enum MenuItemIndex {
+    MENU_ITEM_BOOST_SPD     = 0,
+    MENU_ITEM_BASE_SPD      = 1,
+    MENU_ITEM_CORNER_SPD    = 2,
+    MENU_ITEM_KP_GAIN       = 3,
+    MENU_ITEM_KD_GAIN       = 4,
+    MENU_ITEM_KC_GAIN       = 5,
+    MENU_ITEM_ACTIVE_BRAKE  = 6,
+    MENU_ITEM_SAVE_EXIT     = 7,
+    MENU_ITEM_CANCEL        = 8,
+    MENU_ITEM_RESTORE_DEF   = 9,
+    MENU_ITEM_TEST_LINE_HOLD = 10
+};
+
 struct MenuDisplayData {
     int   selectedIndex;
     bool  isEditing;
