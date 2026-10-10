@@ -26,10 +26,7 @@ static int hIdx = 0;
 static float leftSpeedMmS = 0.0f;
 static float rightSpeedMmS = 0.0f;
 
-// Distance per 4x quadrature tick (mm):
-// Circumference = PI * 68mm = ~213.628 mm
-// 275.0 ticks per wheel revolution -> ~0.7768 mm per tick
-static const float MM_PER_TICK = (3.14159265f * WHEEL_DIAMETER_MM) / ENCODER_TICKS_PER_REV;
+// Distance per 4x quadrature tick MM_PER_TICK is defined in config.h (~0.7768 mm per tick)
 
 static volatile uint32_t lastLeftEdgeUs = 0;
 static volatile uint32_t lastRightEdgeUs = 0;

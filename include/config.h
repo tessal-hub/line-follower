@@ -2,56 +2,37 @@
 #include <Arduino.h>
 
 // ==========================================
-// 1. Motor & Physical Specifications
+// 1. Physical Specifications
 // ==========================================
-#define MOTOR_MODEL_INFO        "JGB37-520 12V 1590RPM"
 #define GEAR_REDUCTION_RATIO    6.25f                       // Gear ratio for 1590RPM variant (6.25:1)
 #define MOTOR_HALL_PPR          11.0f                       // Rotor Hall pulse count per revolution
-#define ENCODER_TICKS_PER_REV   (MOTOR_HALL_PPR * GEAR_REDUCTION_RATIO * 4.0f) // 275.0 ticks per wheel rev (4x Quadrature)
+#define ENCODER_TICKS_PER_REV   (MOTOR_HALL_PPR * GEAR_REDUCTION_RATIO * 4.0f) // 275.0 ticks per wheel rev
 #define WHEEL_DIAMETER_MM       68.0f                       // Wheel diameter (mm)
-#define MAX_MOTOR_RPM           1590.0f                     // Max motor RPM at 12V
-#define MAX_WHEEL_SPEED_MMS     2200.0f                     // Physical motor wheel speed ceiling at 12V 100% PWM (~2200 mm/s)
+#define MM_PER_TICK             ((3.14159265f * WHEEL_DIAMETER_MM) / ENCODER_TICKS_PER_REV) // ~0.7768 mm/tick
+#define TRACK_WIDTH_MM          160.0f                      // Wheel-to-wheel distance (mm)
 
-// Chassis Geometry (mm)
-#define SENSOR_BAR_WIDTH_MM     83.0f                       // 83mm sensor bar span (center Ch0 to center Ch7)
-#define SENSOR_PITCH_MM         (SENSOR_BAR_WIDTH_MM / 7.0f)// 11.857 mm pitch between sensor centers
-#define SENSOR_EXTRAPOLATE_POS  4.25f                       // Extrapolated index (4.0 - 4.5) when line leaves bar edge
+// Sensor Bar Geometry (mm)
+#define SENSOR_BAR_WIDTH_MM     83.0f                       // 83mm sensor bar span (center Ch0 to Ch7)
+#define SENSOR_PITCH_MM         (SENSOR_BAR_WIDTH_MM / 7.0f)// 11.857 mm pitch between sensors
+#define SENSOR_EXTRAPOLATE_POS  4.25f                       // Extrapolated index when line leaves bar edge
 #define SENSOR_EXTRAPOLATE_MM   (SENSOR_EXTRAPOLATE_POS * SENSOR_PITCH_MM) // ~50.39 mm
-#define SENSOR_OVERHANG_MM      160.0f                      // 160mm distance from sensor bar to axle
-#define TRACK_WIDTH_MM          160.0f                      // 160mm wheelbase (wheel-to-wheel)
+#define SENSOR_CENTER_TRIM      0.0f                        // Center trim offset (mm)
 
-// Speed & Control Parameters (Open-Loop PWM Fallback)
-#define BASE_RUN_PWM            145                         // Cruising speed on straight (PWM)
-#define MIN_CORNER_SPEED        125                         // Instant speed cut in sharp corners (PWM)
-#define MAX_STEER_PWM           205                         // Maximum steering authority on line tracking (boosted for sharp curves)
-#define DEFAULT_D_FILTER_ALPHA  0.45f                       // Low-pass EMA filter coefficient for derivative
-
-// Closed-Loop Speed Control (mm/s via Encoders)
-#define ENABLE_CLOSED_LOOP_SPEED    true                    // Set true for constant mm/s closed-loop, false for open-loop PWM
-#define TARGET_BOOST_SPEED_MMS      1100.0f                 // Rocket boost speed on confirmed straights (mm/s) - khoi dau an toan, tang dan qua OLED
-#define TARGET_BASE_SPEED_MMS       900.0f                  // Target cruising speed on normal straights (mm/s)
-#define TARGET_CORNER_SPEED_MMS     550.0f                  // Target speed in curves / flanks (mm/s)
-#define SPEED_FF_GAIN               0.115f                  // Feedforward gain: PWM duty per mm/s
-#define FF_OFFSET_PWM               0.0f                    // Feedforward deadband offset PWM (dz)
-#define SPEED_KP_GAIN               0.16f                   // Proportional gain for speed error
-#define SPEED_KI_GAIN               0.75f                   // Integral gain for battery voltage drop compensation
-#define SPEED_MAX_I_PWM             40.0f                   // Anti-windup clamp for integral PWM contribution
-
-// Tuned PID for 160mm Overhang Lever Arm (Pure Pursuit geometric scale Kp ~ 2/L^2 = 78 m^-2)
-#define KP_GAIN                 45.0f                       // Pure Pursuit curvature gain (40.0 - 60.0 m^-2)
-#define KD_GAIN                 92.0f                       // Angular rate damping to prevent whip across center (damping ratio ~ Kd/sqrt(Kp))
-#define K_CURVE_GAIN            14.5f                       // Progressive cornering boost to prevent understeer at corner entry
-#define CONTROL_LOOP_MS         4                           // 4 ms deterministic loop (250 Hz - rock solid for 8ch MUX + encoders)
-#define SENSOR_CENTER_TRIM      0.0f                        // Fine-tune center line bias (e.g. -0.2 to shift left)
-
-// Safety Auto-Stop Timeout
+// Deterministic Loop & Safety
+#define CONTROL_LOOP_MS         4                           // 4 ms loop (250 Hz)
 #define LINE_LOST_TIMEOUT_MS    700                         // Stop motors if line lost for >700ms
 
-// Encoder direction invert flags (swap if encoder ticks count backwards)
+// Pure PD Defaults (Direct PWM [0..255])
+#define DEFAULT_BOOST_SPEED     160.0f                      // Boost PWM on straight line
+#define DEFAULT_BASE_SPEED      130.0f                      // Base cruising PWM
+#define DEFAULT_CORNER_SPEED    90.0f                       // Cornering entry PWM
+#define KP_GAIN                 4.5f                        // Direct P multiplier: P = Kp * error_mm
+#define KD_GAIN                 22.0f                       // Direct D multiplier: D = Kd * delta_error_mm
+#define K_CURVE_GAIN            0.0f                        // Optional extra gain on sharp turns
+
+// Direction Invert Flags
 #define INVERT_LEFT_ENCODER     false
 #define INVERT_RIGHT_ENCODER    false
-
-// Motor direction invert flags (swap if motor runs backward)
 #define INVERT_LEFT_MOTOR       false
 #define INVERT_RIGHT_MOTOR      false
 
@@ -62,9 +43,6 @@
 #define PIN_MOTOR_LEFT_IN2      19
 #define PIN_MOTOR_RIGHT_IN1     26
 #define PIN_MOTOR_RIGHT_IN2     25
-
-// Motor Control Mode (DRV8871)
-#define MOTOR_SLOW_DECAY        true                        // Active Back-EMF dynamic braking in PWM off-phase
 
 // Encoders (JGB37-520)
 #define PIN_ENC_LEFT_A          32
@@ -77,27 +55,25 @@
 #define PIN_MUX_S0              16
 #define PIN_MUX_S1              17
 #define PIN_MUX_S2              23
-#define MUX_SWITCH_DELAY_US     25                          // 25us settling time per channel
-#define MUX_ADC_SAMPLES         4                           // 4 samples averaged per channel
-#define SENSOR_FLOOR_THRESH     180.0f                      // Continuous floor threshold (180/1000)
-#define SENSOR_MIN_DENOM        100.0f                      // Min total denominator sum to detect line
+#define MUX_SWITCH_DELAY_US     80                          // Settling time per channel (us, eliminates RC crosstalk)
+#define MUX_ADC_SAMPLES         2                           // Fast 2x oversampling
 
 // Pushbuttons (Hardware RC Debounced)
 #define PIN_BTN_SW1             13                          // SW1: Calibrate (idle) / E-Stop
 #define PIN_BTN_SW2             14                          // SW2: Toggle Start / Stop
-#define PIN_BTN_SW3             27                          // SW3: Speed mode / Lap
+#define PIN_BTN_SW3             27                          // SW3: OLED Menu
 
 // I2C OLED 1.3" (128x64)
 #define PIN_I2C_SDA             21
 #define PIN_I2C_SCL             22
-#define OLED_I2C_ADDR           0x3C                        // Standard I2C address
-#define OLED_DRIVER_SH1106      1                           // 1 for 1.3" SH1106 (standard 1.3" OLED), 0 for SSD1306
-#define OLED_REFRESH_HZ         10                          // Background refresh rate on Core 0 (10 Hz)
+#define OLED_I2C_ADDR           0x3C
+#define OLED_DRIVER_SH1106      1                           // 1 for SH1106, 0 for SSD1306
+#define OLED_REFRESH_HZ         10                          // Background refresh on Core 0
 
 // ==========================================
-// 3. PWM / LEDC Configuration
+// 3. PWM Configuration
 // ==========================================
-#define PWM_FREQ_HZ             20000                       // 20 kHz ultrasonic carrier
+#define PWM_FREQ_HZ             20000                       // 20 kHz carrier
 #define PWM_RES_BITS            8                           // 8-bit resolution (0-255)
 #define LEDC_CH_LEFT_IN1        0
 #define LEDC_CH_LEFT_IN2        1
@@ -105,51 +81,41 @@
 #define LEDC_CH_RIGHT_IN2       3
 
 // ==========================================
-// 4. Sensor Geometry Weights (83mm Bar)
-// Centers at ±5.9mm, ±17.8mm, ±29.6mm, ±41.5mm
-// Normalized scale: -3.5 (M1) to +3.5 (M8)
+// 4. Sensor Geometry Weights
+// Normalized: -3.5 (M1) to +3.5 (M8)
 // ==========================================
 const float SENSOR_WEIGHTS[8] = {
-    -3.5f, // Ch 0: M1 (Leftmost,  -41.5mm)
-    -2.5f, // Ch 1: M2 (-29.6mm)
-    -1.5f, // Ch 2: M3 (-17.8mm)
-    -0.5f, // Ch 3: M4 (-5.9mm,  Center-Left)
-     0.5f, // Ch 4: M5 (+5.9mm,  Center-Right)
-     1.5f, // Ch 5: M6 (+17.8mm)
-     2.5f, // Ch 6: M7 (+29.6mm)
-     3.5f  // Ch 7: M8 (Rightmost, +41.5mm)
+    -3.5f, -2.5f, -1.5f, -0.5f,
+     0.5f,  1.5f,  2.5f,  3.5f
 };
 
 // ==========================================
-// 5. Dynamic Car Configuration (Flash NVS Stored)
+// 5. Dynamic Car Configuration (Flash NVS)
 // ==========================================
 struct CarConfig {
-    float boostSpeedMmS;   // 1200 - 2200 (step 50) - Rocket boost on straight track
-    float baseSpeedMmS;    // 800 - 1800 (step 50)  - Normal cruising speed
-    float cornerSpeedMmS;  // 600 - 1200 (step 50)  - Safe corner entry speed
-    float kpGain;          // 0.0 - 100.0 (step 1.0)
-    float kdGain;          // 0.0 - 150.0 (step 1.0)
-    float kCurveGain;      // 0.0 - 30.0 (step 0.5)
-    bool  activeBrakeEn;   // true / false (Electronic ABS)
+    float boostSpeed;      // PWM: 50 - 255
+    float baseSpeed;       // PWM: 40 - 255
+    float cornerSpeed;     // PWM: 30 - 255
+    float kpGain;          // 0.0 - 30.0 (Direct multiplier on error_mm)
+    float kdGain;          // 0.0 - 100.0 (Direct multiplier on delta_error_mm)
+    float kCurveGain;      // 0.0 - 20.0 (Optional curve boost)
+    bool  activeBrakeEn;   // Dynamic braking (true / false)
 };
 
 void configLoad(CarConfig &cfg);
 void configSave(const CarConfig &cfg);
 void configResetDefaults(CarConfig &cfg);
 
-// ==========================================
-// 6. Menu & Tuning Parameter Bounds
-// ==========================================
-#define CFG_BOOST_SPD_MIN       1000.0f
-#define CFG_BOOST_SPD_MAX       2500.0f
-#define CFG_BASE_SPD_MIN        200.0f
-#define CFG_BASE_SPD_MAX        2200.0f
-#define CFG_CORNER_SPD_MIN      200.0f
-#define CFG_CORNER_SPD_MAX      1500.0f
+// Menu Parameter Bounds
+#define CFG_BOOST_SPD_MIN       50.0f
+#define CFG_BOOST_SPD_MAX       255.0f
+#define CFG_BASE_SPD_MIN        40.0f
+#define CFG_BASE_SPD_MAX        255.0f
+#define CFG_CORNER_SPD_MIN      30.0f
+#define CFG_CORNER_SPD_MAX      255.0f
 #define CFG_KP_MIN              0.0f
-#define CFG_KP_MAX              100.0f
+#define CFG_KP_MAX              30.0f
 #define CFG_KD_MIN              0.0f
-#define CFG_KD_MAX              150.0f
+#define CFG_KD_MAX              100.0f
 #define CFG_KC_MIN              0.0f
-#define CFG_KC_MAX              30.0f
-
+#define CFG_KC_MAX              20.0f

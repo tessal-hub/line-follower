@@ -25,7 +25,7 @@ struct DisplaySnapshotData {
     int rightPwm;
     float rate;
     bool isCalibrated;
-    float baseSpeedMmS;
+    float baseSpeed;
     uint32_t calibElapsedMs;
     uint32_t calibTotalMs;
     char msgTitle[20];
@@ -35,8 +35,8 @@ struct DisplaySnapshotData {
 };
 
 static DisplaySnapshotData currentSnapshot = {
-    DISP_MODE_IDLE, 0.0f, false, {0}, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0.0f, false, 1250.0f, 0, 0, "", "", 0,
-    {0, false, 1650.0f, 1250.0f, 850.0f, 24.0f, 38.0f, 7.5f, true}
+    DISP_MODE_IDLE, 0.0f, false, {0}, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0.0f, false, 140.0f, 0, 0, "", "", 0,
+    {0, false, DEFAULT_BOOST_SPEED, DEFAULT_BASE_SPEED, DEFAULT_CORNER_SPEED, KP_GAIN, KD_GAIN, K_CURVE_GAIN, true}
 };
 
 static portMUX_TYPE dispMux = portMUX_INITIALIZER_UNLOCKED;
@@ -55,7 +55,7 @@ void displayUpdateSnapshot(
     int rightPwm,
     float rate,
     bool isCalibrated,
-    float baseSpeedMmS
+    float baseSpeed
 ) {
     portENTER_CRITICAL(&dispMux);
     currentSnapshot.mode          = mode;
@@ -74,14 +74,14 @@ void displayUpdateSnapshot(
     currentSnapshot.rightPwm      = rightPwm;
     currentSnapshot.rate          = rate;
     currentSnapshot.isCalibrated  = isCalibrated;
-    currentSnapshot.baseSpeedMmS  = baseSpeedMmS;
+    currentSnapshot.baseSpeed     = baseSpeed;
     portEXIT_CRITICAL(&dispMux);
 }
 
 void displayUpdateMenu(const MenuDisplayData &menu) {
     portENTER_CRITICAL(&dispMux);
     currentSnapshot.mode       = DISP_MODE_MENU;
-    currentSnapshot.msgUntilMs = 0; // Xóa ngay lập tức bất kỳ popup nào đang chạy
+    currentSnapshot.msgUntilMs = 0;
     currentSnapshot.msgTitle[0] = '\0';
     currentSnapshot.msgText[0]  = '\0';
     currentSnapshot.menu       = menu;
@@ -127,7 +127,7 @@ static void drawSplash() {
     u8g2.drawStr(10, 20, "FAST LINE CAR");
 
     u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(12, 36, "ESP32 | 250Hz Loop");
+    u8g2.drawStr(12, 36, "ESP32 | 250Hz PD");
     u8g2.drawStr(12, 50, "1.3\" SH1106 OLED");
 
     u8g2.sendBuffer();
@@ -138,16 +138,15 @@ static void drawIdle(const DisplaySnapshotData &data) {
     u8g2.drawBox(0, 0, 128, 11);
     u8g2.setDrawColor(0);
     u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(2, 9, "IDLE | SW2:RUN SW1:CAL");
+    u8g2.drawStr(2, 9, "IDLE | SW2:RUN SW3:MENU");
     u8g2.setDrawColor(1);
 
     // 8-Sensor Bar Graph
-    // 8 boxes: width 11px, gap 2px. Total width = 8*11 + 7*2 = 102px
     const int startX = 13;
     const int startY = 14;
     for (int i = 0; i < 8; i++) {
         int x = startX + i * 13;
-        if (data.sensorNorm[i] > 250) {
+        if (data.sensorNorm[i] > 180) {
             u8g2.drawBox(x, startY, 11, 10);
         } else {
             u8g2.drawFrame(x, startY, 11, 10);
@@ -171,7 +170,7 @@ static void drawIdle(const DisplaySnapshotData &data) {
     snprintf(buf, sizeof(buf), "L:%4.0f mm  R:%4.0f mm", data.leftDistMm, data.rightDistMm);
     u8g2.drawStr(2, 52, buf);
 
-    snprintf(buf, sizeof(buf), "Base:%.0f [SW3:MENU]", data.baseSpeedMmS > 0.0f ? data.baseSpeedMmS : TARGET_BASE_SPEED_MMS);
+    snprintf(buf, sizeof(buf), "Base:%.0f [SW2-GIU:HOLD]", data.baseSpeed > 0.0f ? data.baseSpeed : DEFAULT_BASE_SPEED);
     u8g2.drawStr(2, 62, buf);
 }
 
@@ -180,7 +179,7 @@ static void drawRunning(const DisplaySnapshotData &data) {
     u8g2.drawBox(0, 0, 128, 11);
     u8g2.setDrawColor(0);
     u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(2, 9, "RUNNING | 250Hz CASCADE");
+    u8g2.drawStr(2, 9, "RUNNING | 250Hz PD");
     u8g2.setDrawColor(1);
 
     // Deviation gauge bar
@@ -203,10 +202,10 @@ static void drawRunning(const DisplaySnapshotData &data) {
     snprintf(buf, sizeof(buf), "e:%+4.1fmm  %s", data.error, data.lineDetected ? "TRACK" : "SEARCH");
     u8g2.drawStr(2, 35, buf);
 
-    snprintf(buf, sizeof(buf), "Spd: L:%-4.0f R:%-4.0f", data.leftSpeedMmS, data.rightSpeedMmS);
+    snprintf(buf, sizeof(buf), "PWM: L:%+4d R:%+4d", data.leftPwm, data.rightPwm);
     u8g2.drawStr(2, 48, buf);
 
-    snprintf(buf, sizeof(buf), "Dist: %-5.0f mm", (data.leftDistMm + data.rightDistMm) * 0.5f);
+    snprintf(buf, sizeof(buf), "Spd: %-4.0f Dist:%-5.0f", (data.leftSpeedMmS + data.rightSpeedMmS) * 0.5f, (data.leftDistMm + data.rightDistMm) * 0.5f);
     u8g2.drawStr(2, 61, buf);
 }
 
@@ -220,7 +219,7 @@ static void drawHold(const DisplaySnapshotData &data) {
 
     // Deviation gauge bar
     u8g2.drawFrame(14, 14, 100, 8);
-    u8g2.drawLine(64, 13, 64, 22); // Center target line
+    u8g2.drawLine(64, 13, 64, 22);
 
     if (data.lineDetected) {
         int markX = 64 + (int)roundf(data.error * 1.15f);
@@ -228,7 +227,6 @@ static void drawHold(const DisplaySnapshotData &data) {
         u8g2.drawBox(markX - 2, 15, 5, 6);
     }
 
-    // Control parameters
     u8g2.setFont(u8g2_font_6x10_tf);
     char buf[32];
 
@@ -238,27 +236,23 @@ static void drawHold(const DisplaySnapshotData &data) {
     snprintf(buf, sizeof(buf), "PWM: L:%+4d  R:%+4d", data.leftPwm, data.rightPwm);
     u8g2.drawStr(2, 48, buf);
 
-    const char *statusStr = "ZONE 2 (DAMP)";
+    const char *statusStr = "TRACKING";
     if (!data.lineDetected) {
         statusStr = "LINE LOST!";
     } else if (fabsf(data.error) < 1.0f) {
-        statusStr = "ZONE 3 (CENTERED)";
-    } else if (fabsf(data.error) >= 6.0f) {
-        statusStr = "ZONE 1 (MAX P)";
+        statusStr = "CENTERED";
     }
     snprintf(buf, sizeof(buf), "State: %s", statusStr);
     u8g2.drawStr(2, 61, buf);
 }
 
 static void drawCalib(const DisplaySnapshotData &data) {
-    // Top Bar (Inverted header)
     u8g2.drawBox(0, 0, 128, 11);
     u8g2.setDrawColor(0);
     u8g2.setFont(u8g2_font_6x10_tf);
     u8g2.drawStr(2, 9, "CALIBRATING (10s)");
     u8g2.setDrawColor(1);
 
-    // Progress Bar
     u8g2.drawFrame(10, 16, 108, 12);
     int pct = 0;
     if (data.calibTotalMs > 0) {
@@ -293,7 +287,6 @@ static void drawPopup(const char *title, const char *msg) {
 static void drawMenu(const MenuDisplayData &menu) {
     const int VISIBLE_ROWS = 4;
 
-    // Inverted Top Header Bar
     u8g2.drawBox(0, 0, 128, 11);
     u8g2.setDrawColor(0);
     u8g2.setFont(u8g2_font_6x10_tf);
@@ -304,7 +297,6 @@ static void drawMenu(const MenuDisplayData &menu) {
     }
     u8g2.setDrawColor(1);
 
-    // Scroll window calculation
     int topIndex = 0;
     if (menu.selectedIndex >= 3) {
         topIndex = menu.selectedIndex - 2;
@@ -316,7 +308,6 @@ static void drawMenu(const MenuDisplayData &menu) {
         topIndex = 0;
     }
 
-    // Render 4 visible rows
     for (int row = 0; row < VISIBLE_ROWS; row++) {
         int itemIdx = topIndex + row;
         if (itemIdx >= TOTAL_MENU_ITEMS) break;
@@ -331,15 +322,15 @@ static void drawMenu(const MenuDisplayData &menu) {
         switch (itemIdx) {
             case MENU_ITEM_BOOST_SPD:
                 snprintf(nameBuf, sizeof(nameBuf), "Bst  Spd");
-                snprintf(valBuf, sizeof(valBuf), "%4.0f", menu.boostSpeedMmS);
+                snprintf(valBuf, sizeof(valBuf), "%4.0f", menu.boostSpeed);
                 break;
             case MENU_ITEM_BASE_SPD:
                 snprintf(nameBuf, sizeof(nameBuf), "Base Spd");
-                snprintf(valBuf, sizeof(valBuf), "%4.0f", menu.baseSpeedMmS);
+                snprintf(valBuf, sizeof(valBuf), "%4.0f", menu.baseSpeed);
                 break;
             case MENU_ITEM_CORNER_SPD:
                 snprintf(nameBuf, sizeof(nameBuf), "Cnr  Spd");
-                snprintf(valBuf, sizeof(valBuf), "%4.0f", menu.cornerSpeedMmS);
+                snprintf(valBuf, sizeof(valBuf), "%4.0f", menu.cornerSpeed);
                 break;
             case MENU_ITEM_KP_GAIN:
                 snprintf(nameBuf, sizeof(nameBuf), "Kp Gain");
@@ -374,7 +365,6 @@ static void drawMenu(const MenuDisplayData &menu) {
         bool isSelected = (itemIdx == menu.selectedIndex);
         if (isSelected) {
             if (menu.isEditing) {
-                // Editing mode: hollow frame with edit arrows
                 u8g2.drawFrame(0, y - 10, 123, 12);
                 u8g2.drawStr(2, y, "*");
                 u8g2.drawStr(10, y, nameBuf);
@@ -384,7 +374,6 @@ static void drawMenu(const MenuDisplayData &menu) {
                     u8g2.drawStr(74, y, editVal);
                 }
             } else {
-                // Navigation mode: solid inverted bar
                 u8g2.drawBox(0, y - 10, 123, 12);
                 u8g2.setDrawColor(0);
                 u8g2.drawStr(2, y, ">");
@@ -395,7 +384,6 @@ static void drawMenu(const MenuDisplayData &menu) {
                 u8g2.setDrawColor(1);
             }
         } else {
-            // Normal unselected row
             u8g2.drawStr(10, y, nameBuf);
             if (valBuf[0] != '\0') {
                 u8g2.drawStr(80, y, valBuf);
@@ -403,7 +391,6 @@ static void drawMenu(const MenuDisplayData &menu) {
         }
     }
 
-    // Scrollbar on right edge (x=126, y=12..63)
     u8g2.drawVLine(126, 12, 51);
     int barHeight = 20;
     int barTop = 13 + (topIndex * (50 - barHeight)) / (TOTAL_MENU_ITEMS - VISIBLE_ROWS);
@@ -414,12 +401,10 @@ static void drawMenu(const MenuDisplayData &menu) {
 // FreeRTOS Core 0 Background Task
 // ----------------------------------------------------
 static void oledCore0Task(void *pvParameters) {
-    // Initialize I2C hardware bus on GPIO 21 (SDA) and GPIO 22 (SCL) at 400 kHz
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);
     u8g2.begin();
     u8g2.setBusClock(400000);
 
-    // Boot Splash Screen
     drawSplash();
     vTaskDelay(pdMS_TO_TICKS(1200));
 
@@ -433,7 +418,6 @@ static void oledCore0Task(void *pvParameters) {
 
         uint32_t now = millis();
         if (snap.mode == DISP_MODE_MENU) {
-            // Chế độ MENU có độ ưu tiên cao nhất, tuyệt đối KHÔNG bị popup che khuất!
             drawMenu(snap.menu);
         } else if (now < snap.msgUntilMs) {
             drawPopup(snap.msgTitle, snap.msgText);
@@ -458,20 +442,18 @@ static void oledCore0Task(void *pvParameters) {
         }
 
         u8g2.sendBuffer();
-
-        // 10 Hz refresh rate (100 ms period)
         vTaskDelay(pdMS_TO_TICKS(1000 / OLED_REFRESH_HZ));
     }
 }
 
 void displayInit() {
     xTaskCreatePinnedToCore(
-        oledCore0Task,      // Task function
-        "OledCore0Task",    // Name of task
-        8192,               // Stack size in bytes (tăng lên 8192 chống tràn stack do snprintf float & U8g2)
-        NULL,               // Parameters
-        1,                  // Low priority (1)
-        &oledTaskHandle,    // Task handle
-        0                   // Core 0 (Protects Core 1 250Hz real-time loop!)
+        oledCore0Task,
+        "OledCore0Task",
+        8192,
+        NULL,
+        1,
+        &oledTaskHandle,
+        0
     );
 }

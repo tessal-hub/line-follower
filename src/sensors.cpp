@@ -25,36 +25,21 @@ void sensorsGetNormValues(int outValues[8]) {
 }
 
 // ----------------------------------------------------
-// Ultra-Fast MUX Channel Switching via ESP32 GPIO Registers
-// (Direct register write takes ~15ns vs 6000ns of 3x digitalWrite)
+// MUX Channel Switching & ADC Sampling (Stable & Clean)
 // ----------------------------------------------------
-static inline void setMuxFast(uint8_t ch) {
-    static const uint32_t MUX_ALL_MASK = (1UL << PIN_MUX_S0) | (1UL << PIN_MUX_S1) | (1UL << PIN_MUX_S2);
-    static const uint32_t MUX_SET_MASKS[8] = {
-        0,                                                                              // ch 0: 000
-        (1UL << PIN_MUX_S0),                                                            // ch 1: 001
-        (1UL << PIN_MUX_S1),                                                            // ch 2: 010
-        (1UL << PIN_MUX_S0) | (1UL << PIN_MUX_S1),                                      // ch 3: 011
-        (1UL << PIN_MUX_S2),                                                            // ch 4: 100
-        (1UL << PIN_MUX_S0) | (1UL << PIN_MUX_S2),                                      // ch 5: 101
-        (1UL << PIN_MUX_S1) | (1UL << PIN_MUX_S2),                                      // ch 6: 110
-        (1UL << PIN_MUX_S0) | (1UL << PIN_MUX_S1) | (1UL << PIN_MUX_S2)               // ch 7: 111
-    };
-    uint32_t setMask = MUX_SET_MASKS[ch & 0x07];
-    uint32_t clearMask = MUX_ALL_MASK & ~setMask;
-    GPIO.out_w1tc = clearMask;
-    GPIO.out_w1ts = setMask;
+static inline void setMux(uint8_t ch) {
+    digitalWrite(PIN_MUX_S0, (ch & 0x01) ? HIGH : LOW);
+    digitalWrite(PIN_MUX_S1, (ch & 0x02) ? HIGH : LOW);
+    digitalWrite(PIN_MUX_S2, (ch & 0x04) ? HIGH : LOW);
 }
 
 uint16_t sensorsReadChannel(uint8_t ch) {
-    setMuxFast(ch);
+    setMux(ch);
     delayMicroseconds(MUX_SWITCH_DELAY_US);
-    analogRead(PIN_MUX_SIG); // Flush ADC S&H capacitance to prevent channel ghosting
-    long sum = 0;
-    for (int s = 0; s < MUX_ADC_SAMPLES; s++) {
-        sum += analogRead(PIN_MUX_SIG);
-    }
-    return (uint16_t)(sum / MUX_ADC_SAMPLES);
+    (void)analogRead(PIN_MUX_SIG); // Flush ADC S&H capacitance
+    uint32_t s1 = analogRead(PIN_MUX_SIG);
+    uint32_t s2 = analogRead(PIN_MUX_SIG);
+    return (uint16_t)((s1 + s2) >> 1); // 2x Oversampling khử gai nhiễu
 }
 
 // ----------------------------------------------------
@@ -179,12 +164,12 @@ void sensorsCalibrate(uint32_t durationMs) {
 
     if (sampleCount == 0) sampleCount = 1;
 
-    // Determine majority line polarity across sensors with valid contrast
+    // Xác định phân cực màu vạch (đen trên trắng hay trắng trên đen)
     int darkVotes = 0;
     int lightVotes = 0;
     for (int i = 0; i < 8; i++) {
         int span = sensorMax[i] - sensorMin[i];
-        if (span >= 500) {
+        if (span >= 180) {
             uint32_t mean = sensorAvg[i] / sampleCount;
             uint16_t midpoint = (sensorMin[i] + sensorMax[i]) / 2;
             if (mean > midpoint) darkVotes++;
@@ -198,9 +183,9 @@ void sensorsCalibrate(uint32_t durationMs) {
         int span = sensorMax[i] - sensorMin[i];
         lineIsDark[i] = uniformLineIsDark;
 
-        if (span < 150) {
+        if (span < 180) {
             sensorEnabled[i] = false;
-            Serial.printf("  Ch %d: Min=%4u | Max=%4u | Span=%4u [TẮT - Không có tương phản!]\n",
+            Serial.printf("  Ch %d: Min=%4u | Max=%4u | Span=%4u [TẮT - Không đủ tương phản (Cần >= 180)!]\n",
                 i, sensorMin[i], sensorMax[i], span);
         } else {
             sensorEnabled[i] = true;
@@ -218,23 +203,6 @@ bool sensorsIsCalibrated() {
     return calibrated;
 }
 
-static inline uint16_t sensorsReadFast(uint8_t ch) {
-    setMuxFast(ch);
-    delayMicroseconds(16); // 16us settle time đảm bảo điện áp ổn định
-    (void)analogRead(PIN_MUX_SIG); // Xả tụ sample-and-hold để khử ghosting giữa các kênh
-    uint32_t s1 = analogRead(PIN_MUX_SIG);
-    uint32_t s2 = analogRead(PIN_MUX_SIG);
-    return (uint16_t)((s1 + s2) >> 1); // 2x Oversampling khử nhiễu trắng ADC và xung PWM
-}
-
-uint32_t sensorsBenchmarkLatency() {
-    uint32_t t0 = micros();
-    for (uint8_t i = 0; i < 8; i++) {
-        sensorsReadFast(i);
-    }
-    return (micros() - t0);
-}
-
 LineDetection sensorsProcess() {
     LineDetection det;
     det.positionMm     = 0.0f;
@@ -246,17 +214,16 @@ LineDetection sensorsProcess() {
 
     uint32_t startUs = micros();
 
-    // 1. Đọc nhanh 8 kênh MUX ADC (settle 16us + 2x oversampling)
+    // 1. Đọc 8 kênh MUX ADC
     uint16_t raw[8];
     for (uint8_t i = 0; i < 8; i++) {
-        raw[i] = sensorsReadFast(i);
+        raw[i] = sensorsReadChannel(i);
     }
     det.adcDurationUs = (uint32_t)(micros() - startUs);
 
-    // 2. Chuẩn hóa analog S_i liên tục [0.0, 1.0] theo đúng phân cực lineIsDark
+    // 2. Chuẩn hóa analog S_i [0.0, 1.0]
     float S[8];
     float sMax = 0.0f;
-    float sMin = 1.0f;
     float sSum = 0.0f;
 
     for (uint8_t i = 0; i < 8; i++) {
@@ -272,7 +239,6 @@ LineDetection sensorsProcess() {
             continue;
         }
 
-        // Bù đúng phân cực màu: Vạch đen trên nền trắng thì raw nhỏ -> S_i cao (1.0)
         float val = 0.0f;
         if (lineIsDark[i]) {
             val = ((float)sensorMax[i] - (float)raw[i]) / (float)span;
@@ -280,97 +246,64 @@ LineDetection sensorsProcess() {
             val = ((float)raw[i] - (float)sensorMin[i]) / (float)span;
         }
         val = constrain(val, 0.0f, 1.0f);
+
+        // Cắt sàn nhiễu 0.15
+        if (val < 0.15f) val = 0.0f;
+        else val = (val - 0.15f) / 0.85f;
+
         S[i] = val;
-        lastNormValues[i] = (int)(val * 1000.0f); // Tương thích hiển thị OLED & Telemetry
+        lastNormValues[i] = (int)roundf(val * 1000.0f);
 
         if (val > sMax) sMax = val;
-        if (val < sMin) sMin = val;
         sSum += val;
     }
 
-    float peakContrast = sMax - sMin;
-
-    // 3. Góc vuông 90°: Không can thiệp bẻ lái mở để tránh xoay compa sai!
-    det.turn90 = 0;
-
-    // 4. BỘ LỌC THÍCH NGHI ĐẶC TRỊ MỌI BỀ MẶT (BÓNG / NHÁM / PHẢN QUANG):
-    // Chỉ cần có tương phản tối thiểu giữa mắt cao nhất và nền (peakContrast >= 0.06) hoặc đỉnh >= 0.16
-    bool hasLineContrast = (peakContrast >= 0.06f) || (sMax >= 0.16f);
-
-    float dynamicFloor = sMin + peakContrast * 0.20f;
-    if (dynamicFloor < 0.05f) dynamicFloor = 0.05f;
-
-    float num = 0.0f;
-    float den = 0.0f;
-
-    if (hasLineContrast) {
+    // 3. Tính trọng tâm vạch (Centroid nguyên thủy)
+    if (sSum > 0.20f) {
+        float num = 0.0f;
+        float den = 0.0f;
         for (uint8_t i = 0; i < 8; i++) {
-            if (S[i] > dynamicFloor) {
-                float diff = S[i] - dynamicFloor;
-                float active = diff * diff; // Bình phương tăng cường đỉnh vạch thực, triệt tiêu phản xạ gương/chói lóa sàn bóng
-                num += active * SENSOR_WEIGHTS[i];
-                den += active;
+            if (S[i] > 0.0f) {
+                num += S[i] * SENSOR_WEIGHTS[i];
+                den += S[i];
             }
         }
-    }
 
-    if (hasLineContrast && den > 0.005f) {
-        float rawPos = num / den;
-        det.lineDetected = true;
-
-        // Ngoại suy mượt mà liên tục ở 2 mép:
-        float edgeThresh = sMin + peakContrast * 0.30f;
-        if (rawPos >= 3.0f && S[7] > edgeThresh) {
-            float ext = constrain((S[7] - S[6] * 0.70f) / (S[7] + 0.01f), 0.0f, 1.0f);
-            float extNorm = 3.5f + 0.75f * ext;
-            det.positionNorm = (rawPos > extNorm) ? rawPos : extNorm;
-            det.isExtrapolated = (det.positionNorm > 3.6f);
-            det.positionMm   = det.positionNorm * SENSOR_PITCH_MM;
-            lastGoodLineDir  = 1;
-        } else if (rawPos <= -3.0f && S[0] > edgeThresh) {
-            float ext = constrain((S[0] - S[1] * 0.70f) / (S[0] + 0.01f), 0.0f, 1.0f);
-            float extNorm = -3.5f - 0.75f * ext;
-            det.positionNorm = (rawPos < extNorm) ? rawPos : extNorm;
-            det.isExtrapolated = (det.positionNorm < -3.6f);
-            det.positionMm   = det.positionNorm * SENSOR_PITCH_MM;
-            lastGoodLineDir  = -1;
-        } else {
-            det.isExtrapolated = false;
+        if (den > 0.01f) {
+            float rawPos = num / den;
+            det.lineDetected   = true;
             det.positionNorm   = rawPos + SENSOR_CENTER_TRIM;
             det.positionMm     = det.positionNorm * SENSOR_PITCH_MM;
-            // CHỈ cập nhật hướng ghi nhớ khi vạch lệch hẳn ra cánh ngoài (|norm| > 1.80, tương đương > 21mm):
-            // Tuyệt đối không để rung lắc nhẹ ở tâm làm đảo lộn hướng quay khi vào góc rẽ!
-            if (det.positionNorm > 1.80f || S[7] > 0.25f) {
-                lastGoodLineDir = 1;
-            } else if (det.positionNorm < -1.80f || S[0] > 0.25f) {
-                lastGoodLineDir = -1;
-            }
-        }
+            det.confidence     = constrain(sMax, 0.0f, 1.0f);
+            det.isExtrapolated = false;
 
-        det.confidence = constrain(peakContrast / 0.40f, 0.25f, 1.0f);
-        return det;
+            if (det.positionNorm > 0.5f) lastGoodLineDir = 1;
+            else if (det.positionNorm < -0.5f) lastGoodLineDir = -1;
+
+            return det;
+        }
     }
 
-    // 5. Ngoại suy khẩn cấp khi line đã trượt ra ngoài thanh:
-    if (S[7] > 0.15f && S[7] > S[0] + 0.08f) {
+    // Ngoại suy khi vạch trượt hẳn ra mép ngoài
+    if (S[7] > 0.20f && S[7] > S[0]) {
         det.lineDetected   = true;
         det.isExtrapolated = true;
         det.positionNorm   = SENSOR_EXTRAPOLATE_POS;
         det.positionMm     = SENSOR_EXTRAPOLATE_MM;
-        det.confidence     = 0.50f;
+        det.confidence     = 0.5f;
         lastGoodLineDir    = 1;
         return det;
-    } else if (S[0] > 0.15f && S[0] > S[7] + 0.08f) {
+    } else if (S[0] > 0.20f && S[0] > S[7]) {
         det.lineDetected   = true;
         det.isExtrapolated = true;
         det.positionNorm   = -SENSOR_EXTRAPOLATE_POS;
         det.positionMm     = -SENSOR_EXTRAPOLATE_MM;
-        det.confidence     = 0.50f;
+        det.confidence     = 0.5f;
         lastGoodLineDir    = -1;
         return det;
     }
 
-    // Mất line:
+    // Mất line
     det.lineDetected   = false;
     det.isExtrapolated = false;
     det.confidence     = 0.0f;
@@ -397,9 +330,9 @@ void sensorsPrintDebug(float currentError) {
         int norm = lastNormValues[i];
         if (!sensorEnabled[i]) {
             Serial.print("x"); // Disabled/dead sensor marker
-        } else if (norm > 700) {
+        } else if (norm > 600) {
             Serial.print("#");
-        } else if (norm > 250) {
+        } else if (norm > 180) {
             Serial.print("+");
         } else {
             Serial.print(".");
@@ -413,8 +346,8 @@ void sensorsPrintRaw() {
     Serial.print("  Raw ADC: [");
     for (uint8_t i = 0; i < 8; i++) {
         uint16_t r = sensorsReadChannel(i);
-        Serial.printf("%5u", r);
-        if (i < 7) Serial.print(" ");
+        Serial.printf(" %u:%4u", i, r);
+        if (i < 7) Serial.print(" |");
     }
-    Serial.println("]");
+    Serial.println(" ]");
 }

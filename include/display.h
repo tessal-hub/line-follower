@@ -28,9 +28,9 @@ enum MenuItemIndex {
 struct MenuDisplayData {
     int   selectedIndex;
     bool  isEditing;
-    float boostSpeedMmS;
-    float baseSpeedMmS;
-    float cornerSpeedMmS;
+    float boostSpeed;
+    float baseSpeed;
+    float cornerSpeed;
     float kpGain;
     float kdGain;
     float kCurveGain;
@@ -52,11 +52,10 @@ void displayUpdateSnapshot(
     int rightPwm,
     float rate,
     bool isCalibrated,
-    float baseSpeedMmS = 1250.0f
+    float baseSpeed = 140.0f
 );
 
 void displayUpdateMenu(const MenuDisplayData &menu);
-
 void displaySetCalibProgress(uint32_t elapsedMs, uint32_t totalMs);
 void displayShowMessage(const char *title, const char *msg, uint32_t durationMs = 1500);
 void displayClearMessage();

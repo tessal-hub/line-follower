@@ -17,6 +17,7 @@ void motorsInit() {
     ledcAttach(PIN_MOTOR_RIGHT_IN2, PWM_FREQ_HZ, PWM_RES_BITS);
 #else
     ledcSetup(LEDC_CH_LEFT_IN1, PWM_FREQ_HZ, PWM_RES_BITS);
+    
     ledcAttachPin(PIN_MOTOR_LEFT_IN1, LEDC_CH_LEFT_IN1);
     ledcSetup(LEDC_CH_LEFT_IN2, PWM_FREQ_HZ, PWM_RES_BITS);
     ledcAttachPin(PIN_MOTOR_LEFT_IN2, LEDC_CH_LEFT_IN2);
