@@ -1,6 +1,7 @@
 #include "sensors.h"
 #include "config.h"
 #include "display.h"
+#include "motors.h"
 #include <Preferences.h>
 
 static Preferences sensorPrefs;
@@ -129,6 +130,7 @@ void sensorsInit() {
 }
 
 void sensorsCalibrate(uint32_t durationMs) {
+    motorsStop(); // Ensure motors are completely off during calibration
     Serial.println("\n==========================================");
     Serial.printf("[CALIB] Bắt đầu Calibrate trong %u giây...\n", durationMs / 1000);
     Serial.println("  Trượt đều toàn bộ xe qua lại vạch đen để cả 8 mắt đều quét qua!");
