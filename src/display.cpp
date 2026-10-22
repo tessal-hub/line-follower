@@ -11,79 +11,120 @@ static U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NO
 #endif
 
 extern volatile float kp;
-extern volatile int kd;
+extern volatile float kd;
 extern volatile float kCurve;
+extern volatile bool activeBrakeEn;
 extern int nut2;
 extern int nut3;
+extern int nutCorner;
 
-struct MenuConfig {
-  float boostSpeed = 175.0f;
-  float baseSpeed = 125.0f;
-  float cornerSpeed = 90.0f;
-  float kpGain = 15.0f;
-  float kdGain = 55.0f;
-  float kCurveGain = 5.0f;
-  bool  activeBrakeEn = true;
+// Giá trị hiện hành (main.cpp đọc trực tiếp)
+float gParam[P_COUNT];
+
+// ------------------------------------------------------------
+// Bảng định nghĩa tham số: tên, mặc định, min, max, bước, số lẻ (255 = ON/OFF)
+// ------------------------------------------------------------
+#define BOOL_DEC 255
+#define MODE_DEC 254   // 2 trạng thái: PLUG / SHORT
+struct ParamDef {
+  const char *name;
+  float def, mn, mx, step;
+  uint8_t dec;
 };
 
-static MenuConfig mCfg;
+static const ParamDef PDEF[P_COUNT] = {
+  {"Bst Spd",  175.0f,   50.0f, 255.0f,   5.0f, 0},   // P_BOOST
+  {"Base Spd", 125.0f,   40.0f, 255.0f,   5.0f, 0},   // P_BASE
+  {"Cnr Spd",   90.0f,   30.0f, 255.0f,   5.0f, 0},   // P_CORNER
+  {"Kp Gain",   15.0f,    0.0f,  50.0f,   0.5f, 1},   // P_KP
+  {"Kd Gain",   55.0f,    0.0f, 150.0f,   2.0f, 0},   // P_KD
+  {"K-Curve",    5.0f,    0.0f,  30.0f,   1.0f, 1},   // P_KCURVE
+  {"ABS Brk",    1.0f,    0.0f,   1.0f,   1.0f, BOOL_DEC}, // P_ABS
+  {"Ref Spd",  135.0f,   40.0f, 255.0f,   5.0f, 0},   // P_REF_SPD
+  {"Kp Slope",   0.25f,   0.0f,   1.0f,   0.05f, 2},  // P_KP_SLOPE
+  {"Kd Slope",   0.60f,   0.0f,   3.0f,   0.10f, 2},  // P_KD_SLOPE
+  {"Drop Gn",    0.0f,    0.0f,   5.0f,   0.5f, 1},   // P_DROP
+  {"Accel",     25.0f,    1.0f, 100.0f,   5.0f, 0},   // P_ACCEL
+  {"Crv Thr", 3200.0f, 1000.0f, 8000.0f, 100.0f, 0},  // P_CURVE_THR
+  {"Dash Lim",5500.0f, 2000.0f,10000.0f, 250.0f, 0},  // P_DASH_LIM
+  {"Brk Strt",  50.0f,    0.0f, 300.0f,   5.0f, 0},   // P_BRK_STRAIGHT
+  {"Brk Pos", 3500.0f, 1500.0f, 8000.0f, 100.0f, 0},  // P_BRK_POS
+  {"Brk Base", 600.0f,    0.0f, 2000.0f, 100.0f, 0},  // P_BRK_BASE
+  {"Brk Strg",1500.0f,    0.0f, 4000.0f, 100.0f, 0},  // P_BRK_STEER
+  {"SW3 Kp",     1.0f,    0.5f,   2.0f,   0.05f, 2},  // P_SW3_KP
+  {"SW3 Kd",     1.0f,    0.5f,   2.5f,   0.05f, 2},  // P_SW3_KD
+  {"SW3 Kc",     1.0f,    0.5f,   3.0f,   0.10f, 1},  // P_SW3_KC
+  {"Brk Time",  10.0f,    3.0f,  40.0f,   1.0f, 0},   // P_BRK_TIME
+  {"Brk Mode",   1.0f,    0.0f,   1.0f,   1.0f, MODE_DEC}, // P_BRK_MODE
+  {"Vest Dcy",   0.02f,   0.005f, 0.10f,  0.005f, 3}, // P_VEST_DCY
+};
+
+static const int N_ACTIONS  = 4;
+static const int N_ITEMS    = P_COUNT + N_ACTIONS;
+static const int IDX_SAVE    = P_COUNT;
+static const int IDX_CANCEL  = P_COUNT + 1;
+static const int IDX_RESTORE = P_COUNT + 2;
+static const int IDX_TEST    = P_COUNT + 3;
+static const char *ACTION_NAME[N_ACTIONS] = {
+  "[SAVE & EXIT]", "[CANCEL]", "[RESTORE DEF]", "[TEST HOLD]"
+};
+
+static float mCfg[P_COUNT];   // bản đang chỉnh trong menu
 static bool s_inMenu = false;
 static int  s_menuIndex = 0;
 static bool s_menuEdit = false;
 static bool s_testHold = false;
 
-static const char *MENU_NAME[11] = {
-  "Bst Spd","Base Spd","Cnr Spd","Kp Gain","Kd Gain","K-Curve","ABS Brk",
-  "[SAVE & EXIT]","[CANCEL]","[RESTORE DEF]","[TEST HOLD]"
-};
-static float MENU_STEP[11] = {5,5,5,0.5f,2.0f,1.0f,0,0,0,0,0};
-static float MENU_MIN[11]  = {50,40,30,0,0,0,0,0,0,0,0};
-static float MENU_MAX[11]  = {255,255,255,50,150,30,0,0,0,0,0};
+static void setDefaults() {
+  for (int i = 0; i < P_COUNT; i++) mCfg[i] = PDEF[i].def;
+}
 
+// Đẩy mCfg -> gParam và các biến cũ của main.cpp
 static void syncToMain() {
-  kp = mCfg.kpGain;
-  kd = (int)mCfg.kdGain;
-  kCurve = mCfg.kCurveGain;
-  nut2 = constrain((int)(mCfg.baseSpeed * 16.0f), 800, 4095);
-  nut3 = constrain((int)(mCfg.boostSpeed * 16.0f), 1000, 4095);
+  for (int i = 0; i < P_COUNT; i++) gParam[i] = mCfg[i];
+  kp = gParam[P_KP];
+  kd = gParam[P_KD];
+  kCurve = gParam[P_KCURVE];
+  activeBrakeEn = (gParam[P_ABS] > 0.5f);
+  nut2      = constrain((int)(gParam[P_BASE]   * 16.0f), 800, 4095);
+  nut3      = constrain((int)(gParam[P_BOOST]  * 16.0f), 1000, 4095);
+  nutCorner = constrain((int)(gParam[P_CORNER] * 16.0f), 600, 4095);
 }
 
-static float menuValue(int idx) {
-  switch (idx) {
-    case 0: return mCfg.boostSpeed;
-    case 1: return mCfg.baseSpeed;
-    case 2: return mCfg.cornerSpeed;
-    case 3: return mCfg.kpGain;
-    case 4: return mCfg.kdGain;
-    case 5: return mCfg.kCurveGain;
-    case 6: return mCfg.activeBrakeEn ? 1.0f : 0.0f;
-    default: return 0.0f;
-  }
+static bool isToggle(int idx) {
+  return PDEF[idx].dec == BOOL_DEC || PDEF[idx].dec == MODE_DEC;
 }
 
-static void menuSetValue(int idx, float v) {
-  switch (idx) {
-    case 0: mCfg.boostSpeed = v; break;
-    case 1: mCfg.baseSpeed = v; break;
-    case 2: mCfg.cornerSpeed = v; break;
-    case 3: mCfg.kpGain = v; break;
-    case 4: mCfg.kdGain = v; break;
-    case 5: mCfg.kCurveGain = v; break;
-    case 6: mCfg.activeBrakeEn = (v > 0.5f); break;
+static void stepParam(int idx, int dir) {
+  const ParamDef &d = PDEF[idx];
+  if (isToggle(idx)) {
+    mCfg[idx] = (mCfg[idx] > 0.5f) ? 0.0f : 1.0f;
+    return;
   }
+  float v = mCfg[idx] + dir * d.step;
+  v = constrain(v, d.mn, d.mx);
+  v = roundf(v / d.step) * d.step;      // chống trôi số thực
+  mCfg[idx] = constrain(v, d.mn, d.mx);
+}
+
+static void formatValue(int idx, char *out, size_t n) {
+  const ParamDef &d = PDEF[idx];
+  if (d.dec == BOOL_DEC) snprintf(out, n, "%s", mCfg[idx] > 0.5f ? "ON" : "OFF");
+  else if (d.dec == MODE_DEC) snprintf(out, n, "%s", mCfg[idx] > 0.5f ? "SHORT" : "PLUG");
+  else snprintf(out, n, "%.*f", (int)d.dec, mCfg[idx]);
 }
 
 static void loadPrefs() {
+  setDefaults();
   Preferences p;
-  if (p.begin("menu_cfg", true)) {
-    if (p.isKey("valid")) {
-      mCfg.boostSpeed    = p.getFloat("bst", 175.0f);
-      mCfg.baseSpeed     = p.getFloat("base", 125.0f);
-      mCfg.cornerSpeed   = p.getFloat("cnr", 90.0f);
-      mCfg.kpGain        = p.getFloat("kp", 15.0f);
-      mCfg.kdGain        = p.getFloat("kd", 55.0f);
-      mCfg.kCurveGain    = p.getFloat("kc", 5.0f);
-      mCfg.activeBrakeEn = p.getBool("brk", true);
+  if (p.begin("menu2", true)) {
+    if (p.isKey("ver")) {
+      char key[8];
+      for (int i = 0; i < P_COUNT; i++) {
+        snprintf(key, sizeof(key), "v%d", i);
+        float v = p.getFloat(key, PDEF[i].def);
+        mCfg[i] = constrain(v, PDEF[i].mn, PDEF[i].mx);
+      }
     }
     p.end();
   }
@@ -92,15 +133,13 @@ static void loadPrefs() {
 
 static void savePrefs() {
   Preferences p;
-  if (!p.begin("menu_cfg", false)) return;
-  p.putFloat("bst", mCfg.boostSpeed);
-  p.putFloat("base", mCfg.baseSpeed);
-  p.putFloat("cnr", mCfg.cornerSpeed);
-  p.putFloat("kp", mCfg.kpGain);
-  p.putFloat("kd", mCfg.kdGain);
-  p.putFloat("kc", mCfg.kCurveGain);
-  p.putBool("brk", mCfg.activeBrakeEn);
-  p.putBool("valid", true);
+  if (!p.begin("menu2", false)) return;
+  char key[8];
+  for (int i = 0; i < P_COUNT; i++) {
+    snprintf(key, sizeof(key), "v%d", i);
+    p.putFloat(key, mCfg[i]);
+  }
+  p.putUChar("ver", 1);
   p.end();
   syncToMain();
 }
@@ -115,57 +154,72 @@ void displayInit() {
 }
 
 void displayMenuLoop() {
+  const uint32_t REPEAT_DELAY_MS = 400;   // giữ nút > 400ms bắt đầu lặp
+  const uint32_t HOLD_FAST_MS    = 1500;  // giữ > 1.5s: bước x5 (khi đang sửa)
+
   s_inMenu = true;
+  s_menuEdit = false;
   bool last1 = (digitalRead(PIN_BTN_SW1) == LOW);
   bool last2 = (digitalRead(PIN_BTN_SW2) == LOW);
   bool last3 = (digitalRead(PIN_BTN_SW3) == LOW);
+  uint32_t press1 = 0, press2 = 0, rep1 = 0, rep2 = 0;
   bool needRedraw = true;
 
   while (s_inMenu) {
+    uint32_t now = millis();
     bool sw1 = (digitalRead(PIN_BTN_SW1) == LOW);
     bool sw2 = (digitalRead(PIN_BTN_SW2) == LOW);
     bool sw3 = (digitalRead(PIN_BTN_SW3) == LOW);
 
-    if (sw1 && !last1) {
+    bool first1 = sw1 && !last1;
+    bool first2 = sw2 && !last2;
+    bool fire1 = false, fire2 = false;
+    int mult1 = 1, mult2 = 1;
+
+    if (sw1) {
+      if (first1) { fire1 = true; press1 = now; rep1 = now + REPEAT_DELAY_MS; }
+      else if ((int32_t)(now - rep1) >= 0) { fire1 = true; rep1 = now + (s_menuEdit ? 70 : 150); }
+      if (now - press1 > HOLD_FAST_MS) mult1 = 5;
+    }
+    if (sw2) {
+      if (first2) { fire2 = true; press2 = now; rep2 = now + REPEAT_DELAY_MS; }
+      else if ((int32_t)(now - rep2) >= 0) { fire2 = true; rep2 = now + (s_menuEdit ? 70 : 150); }
+      if (now - press2 > HOLD_FAST_MS) mult2 = 5;
+    }
+
+    if (fire1) {
       needRedraw = true;
       if (!s_menuEdit) {
-        s_menuIndex = (s_menuIndex + 10) % 11;
-      } else if (s_menuIndex == 6) {
-        mCfg.activeBrakeEn = !mCfg.activeBrakeEn;
-      } else if (s_menuIndex < 6) {
-        float v = menuValue(s_menuIndex) + MENU_STEP[s_menuIndex];
-        if (v > MENU_MAX[s_menuIndex]) v = MENU_MAX[s_menuIndex];
-        menuSetValue(s_menuIndex, v);
+        s_menuIndex = (s_menuIndex + N_ITEMS - 1) % N_ITEMS;
+      } else if (s_menuIndex < P_COUNT) {
+        if (!isToggle(s_menuIndex) || first1) stepParam(s_menuIndex, +mult1);
       }
     }
-    if (sw2 && !last2) {
+    if (fire2) {
       needRedraw = true;
       if (!s_menuEdit) {
-        s_menuIndex = (s_menuIndex + 1) % 11;
-      } else if (s_menuIndex == 6) {
-        mCfg.activeBrakeEn = !mCfg.activeBrakeEn;
-      } else if (s_menuIndex < 6) {
-        float v = menuValue(s_menuIndex) - MENU_STEP[s_menuIndex];
-        if (v < MENU_MIN[s_menuIndex]) v = MENU_MIN[s_menuIndex];
-        menuSetValue(s_menuIndex, v);
+        s_menuIndex = (s_menuIndex + 1) % N_ITEMS;
+      } else if (s_menuIndex < P_COUNT) {
+        if (!isToggle(s_menuIndex) || first2) stepParam(s_menuIndex, -mult2);
       }
     }
+
     if (sw3 && !last3) {
       needRedraw = true;
       if (s_menuEdit) {
         s_menuEdit = false;
-      } else if (s_menuIndex < 7) {
+      } else if (s_menuIndex < P_COUNT) {
         s_menuEdit = true;
-      } else if (s_menuIndex == 7) {
+      } else if (s_menuIndex == IDX_SAVE) {
         savePrefs();
         s_inMenu = false;
-      } else if (s_menuIndex == 8) {
+      } else if (s_menuIndex == IDX_CANCEL) {
         loadPrefs();
         s_inMenu = false;
-      } else if (s_menuIndex == 9) {
-        mCfg = MenuConfig();
+      } else if (s_menuIndex == IDX_RESTORE) {
+        setDefaults();
         savePrefs();
-      } else if (s_menuIndex == 10) {
+      } else if (s_menuIndex == IDX_TEST) {
         syncToMain();
         s_testHold = true;
         s_inMenu = false;
@@ -178,26 +232,32 @@ void displayMenuLoop() {
       u8g2.clearBuffer();
       u8g2.setFont(u8g2_font_ncenB08_tr);
       u8g2.drawStr(0, 10, s_menuEdit ? "[EDIT] 1:+ 2:- 3:OK" : "MENU | 1:^ 2:v 3:SEL");
-      int top = (s_menuIndex >= 3) ? s_menuIndex - 2 : 0;
-      if (top > 7) top = 7;
-      char buf[48];
+
+      int top = constrain(s_menuIndex - 2, 0, N_ITEMS - 4);
+      char buf[28];
       char val[16];
       for (int r = 0; r < 4; r++) {
         int idx = top + r;
-        if (idx >= 11) break;
+        if (idx >= N_ITEMS) break;
         bool sel = (idx == s_menuIndex);
-        val[0] = '\0';
-        if (idx < 7) {
-          if (idx == 6) snprintf(val, sizeof(val), "%s", mCfg.activeBrakeEn ? "ON" : "OFF");
-          else snprintf(val, sizeof(val), "%.1f", menuValue(idx));
+        int y = 22 + r * 12;
+
+        if (idx < P_COUNT) {
+          snprintf(buf, sizeof(buf), "%c %s", sel ? '>' : ' ', PDEF[idx].name);
+          u8g2.drawStr(0, y, buf);
+
+          formatValue(idx, val, sizeof(val));
           if (s_menuEdit && sel) {
-            char t[24];
+            char t[20];
             snprintf(t, sizeof(t), "<%s>", val);
-            snprintf(val, sizeof(val), "%s", t);
+            u8g2.drawStr(78, y, t);
+          } else {
+            u8g2.drawStr(78, y, val);
           }
+        } else {
+          snprintf(buf, sizeof(buf), "%c %s", sel ? '>' : ' ', ACTION_NAME[idx - P_COUNT]);
+          u8g2.drawStr(0, y, buf);
         }
-        snprintf(buf, sizeof(buf), "%c %s %s", sel ? '>' : ' ', MENU_NAME[idx], val);
-        u8g2.drawStr(0, 22 + r * 12, buf);
       }
       u8g2.sendBuffer();
     }
@@ -245,15 +305,15 @@ void displayShowMessage(const char *title, const char *msg, uint32_t durationMs)
 void displayShowStatus(const char *mode, int speed, int pos, unsigned char sensorBits) {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_ncenB08_tr);
-  
+
   char header[28];
   snprintf(header, sizeof(header), "%s | Spd:%d", mode, speed);
   u8g2.drawStr(0, 12, header);
-  
+
   char posBuf[28];
   snprintf(posBuf, sizeof(posBuf), "Pos: %d", pos);
   u8g2.drawStr(0, 26, posBuf);
-  
+
   for (int i = 0; i < 8; i++) {
     int x = 4 + i * 15;
     u8g2.drawFrame(x, 32, 12, 14);
@@ -261,7 +321,7 @@ void displayShowStatus(const char *mode, int speed, int pos, unsigned char senso
       u8g2.drawBox(x + 2, 34, 8, 10);
     }
   }
-  
+
   u8g2.setFont(u8g2_font_5x7_tr);
   u8g2.drawStr(0, 60, "1:Cal 2:Run 3:Fast [H:Menu]");
   u8g2.sendBuffer();

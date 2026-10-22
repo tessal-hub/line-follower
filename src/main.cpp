@@ -1,5 +1,5 @@
 // ============================================================
-// Line Follower - Smooth PD + K-Curve + Fast 90-Degree Turn
+// Line Follower - Anti-Overshoot Reverse Brake + 250Hz PD
 // ============================================================
 #include <Arduino.h>
 #include <EEPROM.h>
@@ -13,7 +13,6 @@
 unsigned char isCalib = 0;
 int calPID = 0;
 unsigned char sensor = 0;               // 8-bit bitmask: bit7 (0x80) = Ch0 (Trái), bit0 (0x01) = Ch7 (Phải)
-int PIDfre = 0;
 unsigned int sensorValue[8];
 unsigned int sensorPID[8];              // Chuẩn hóa [0..3000] cho PID
 unsigned int black_value[8];
@@ -23,16 +22,26 @@ unsigned int compare_value[8];          // Ngưỡng phân tách đen/trắng
 // =================== PID Output ===================
 long lastPos = 0;
 long posPID = 0;
-float dFiltered = 0.0f;                 // Bộ lọc chống giật cho khâu D
+float dFiltered = 0.0f;                 // Bộ lọc chống giật cho khâu D (250Hz)
 volatile float kp = 15.0f;
-volatile int kd = 55;
+volatile float kd = 55.0f;
 volatile float kCurve = 5.0f;           // Hệ số tăng lực rẽ cua gắt / góc vuông từ Menu OLED
+volatile bool activeBrakeEn = true;     // Bật/tắt phanh chủ động trước cua từ Menu OLED
 int servoPwm = 0;                       // Lực lái PID (-4095 .. +4095)
 
-// =================== State Machine ===================
+// =================== State Machine & Speed Control ===================
 int speed_run_forward = 0;
-int nut2 = 2000;                        // Tốc độ vừa (SW2)
-int nut3 = 2800;                        // Tốc độ nhanh (SW3)
+int nut2 = 2000;                        // Tốc độ vừa (SW2 - Base Speed)
+int nut3 = 2800;                        // Tốc độ nhanh (SW3 - Boost Speed)
+int nutCorner = 1440;                   // Tốc độ ôm cua (Corner Speed)
+bool isHighSpeedMode = false;           // Cờ đánh dấu đang chạy chế độ SW3 (Fast)
+
+int cmdSpeed = 0;                       // Tốc độ tiến vừa cấp cho động cơ (ghi bởi handleAndSpeed)
+float vEst = 0.0f;                      // Ước lượng tốc độ thực: tăng tức thì, giảm chậm (quán tính xe)
+float currentSpeed = 0.0f;              // Tốc độ thực tế đang cấp (có Ramp & Brake)
+int straightCnt = 0;                    // Đếm thời gian chạy thẳng tích lũy động năng (1 đơn vị = 4ms)
+int brakeHoldCnt = 0;                   // Đếm số chu kỳ phanh ngược (Reverse Plugging) khi chớm vào cua
+
 int cnt = 0;                            // Đếm thời gian mất line (1 đơn vị = 4ms)
 int cnt1 = 0;                           // Đếm timeout khi đang xoay tìm line
 unsigned char pattern = 11;
@@ -51,6 +60,7 @@ static uint32_t lastBtnPollMs = 0;
 
 // =================== Forward Declarations ===================
 void speed_run(int speedDC_left, int speedDC_right);
+void motors_short_brake();
 void handleAndSpeed(int angle, int speed1);
 void runforwardline(int tocdo);
 void updateLine();
@@ -132,7 +142,7 @@ void setup() {
 }
 
 // =============================================================
-// ĐỊNH THỜI ĐỌC SENSOR 250Hz BẰNG MICROS() (4ms / chu kỳ)
+// ĐỊNH THỜI ĐỌC SENSOR & TÍNH PID ĐỒNG BỘ 250Hz (4ms / chu kỳ)
 // =============================================================
 void pollSensorAndPID() {
   static uint32_t lastScanUs = 0;
@@ -151,7 +161,6 @@ void pollSensorAndPID() {
 // =============================================================
 void read_sensor() {
   unsigned char temp = 0;
-  PIDfre++;
 
   for (int j = 0; j < 8; j++) {
     digitalWrite(PIN_MUX_S0, (j & 0x01) ? HIGH : LOW);
@@ -184,37 +193,43 @@ void read_sensor() {
   }
   sensor = temp;
 
-  // Nhận diện hướng rẽ góc vuông / cua gắt:
-  // 1. Khi có >= 3 mắt lệch hẳn về bên phải (ví dụ 0b00000111, 0b00001111, 0b00011111) hoặc chạm mắt ngoài cùng bên phải (bit 0, 1)
+  // -----------------------------------------------------------------
+  // NHẬN DIỆN HƯỚNG RẼ GÓC VUÔNG / CUA GẮT (An toàn tuyệt đối cho Nét đứt):
+  // -----------------------------------------------------------------
+  // 1. Khi chạm 2 mắt ngoài cùng bên phải (Ch6, Ch7: 0b00000011)
   if ((sensor & 0b00000011) != 0 && (sensor & 0b11000000) == 0) {
     RememberLine = 1;
     centerClearCnt = 0;
   }
-  // 2. Khi chạm mắt ngoài cùng bên trái (bit 6, 7)
+  // 2. Khi chạm 2 mắt ngoài cùng bên trái (Ch0, Ch1: 0b11000000)
   else if ((sensor & 0b11000000) != 0 && (sensor & 0b00000011) == 0) {
     RememberLine = -1;
     centerClearCnt = 0;
   }
-  // 3. Nếu vạch chỉ nằm gọn ở 4 mắt giữa liên tục ít nhất 6 chu kỳ (24ms) -> Chắc chắn đang đi thẳng (reset RememberLine = 0 để sẵn sàng vượt nét đứt)
+  // 3. Khi vạch nằm gọn trong 4 mắt giữa (Ch2..Ch5: 0b00111100) và không chạm 2 mắt rìa
+  // liên tục 5 chu kỳ (20ms) -> Xóa RememberLine = 0 để sẵn sàng vượt nét đứt
   else if ((sensor & 0b00111100) != 0 && (sensor & 0b11000011) == 0) {
     centerClearCnt++;
-    if (centerClearCnt >= 6) {
+    if (centerClearCnt >= 5) {
       RememberLine = 0;
     }
   }
 
-  if (PIDfre >= 2) { // Tính PID ở 125Hz (mỗi 8ms)
-    PIDfre = 0;
-    calPID = 1;
-  }
+  calPID = 1;
 }
 
 // =============================================================
-// PID + K-CURVE TĂNG LỰC BẺ GÓC
+// PID 250Hz + K-CURVE MẠNH CHỐNG VĂNG CUA TỐC ĐỘ CAO
 // =============================================================
 void PID() {
   if (calPID == 1) {
     calPID = 0;
+
+    // Ước lượng tốc độ thực của xe: tăng theo lệnh ngay, giảm chậm theo quán tính.
+    // Gain scheduling dùng vEst (không dùng tốc độ lệnh) để KHÔNG hạ Kd đúng lúc vào cua.
+    float cmdF = (float)max(cmdSpeed, 0);
+    if (cmdF >= vEst) vEst = cmdF;
+    else vEst += (cmdF - vEst) * gParam[P_VEST_DCY];
 
     if (sensor == 0b00000000) {
       dFiltered = 0.0f;
@@ -235,22 +250,41 @@ void PID() {
     }
     posPID = i;
 
-    // Vùng chết nhỏ quanh tâm (Deadband ±150) giúp xe đi thẳng đầm, không lắc đầu
-    long err = (abs(i) < 150) ? 0 : i;
+    // Vùng chết nhỏ quanh tâm (Deadband ±120) giúp xe đi thẳng đầm
+    long err = (abs(i) < 120) ? 0 : i;
 
-    // Lọc thông thấp (EMA) cho đạo hàm vị trí để triệt tiêu gai nhiễu
-    float rawDelta = (float)(i - lastPos);
+    // Tần số 250Hz (4ms) nhanh gấp đôi 125Hz (8ms) nên nhân 2.0f để giữ nguyên thang Kd
+    float rawDelta = (float)(i - lastPos) * 2.0f;
     dFiltered = 0.55f * rawDelta + 0.45f * dFiltered;
 
-    // Khâu P + D cơ bản (êm ái ở vùng giữa)
-    float pTerm = kp * (float)err;
-    float dTerm = (float)kd * dFiltered * 3.0f;
+    // Gain scheduling theo tốc độ (tất cả chỉnh từ Menu OLED):
+    // tốc độ cao -> Kp giảm nhẹ, Kd tăng để chống overshoot.
+    float refSp = gParam[P_REF_SPD] * 16.0f;
+    if (refSp < 640.0f) refSp = 640.0f;
+    float vNow = vEst;
+    float r = constrain(vNow / refSp, 0.8f, 2.0f);
 
-    // Khâu K-Curve: Khi xe lệch ra ngoài vùng giữa (|err| > 3500), K-Curve bơm thêm lực bẻ lái mạnh để ép đầu xe vào góc cua
+    float activeKp     = kp * (1.0f - gParam[P_KP_SLOPE] * (r - 1.0f));
+    float activeKd     = kd * (1.0f + gParam[P_KD_SLOPE] * (r - 1.0f));
+    float activeKCurve = kCurve;
+    if (activeKp < 0.0f) activeKp = 0.0f;
+    if (isHighSpeedMode) {
+      activeKp     *= gParam[P_SW3_KP];
+      activeKd     *= gParam[P_SW3_KD];
+      activeKCurve *= gParam[P_SW3_KC];
+    }
+
+    // Khâu P + D cơ bản
+    float pTerm = activeKp * (float)err;
+    float dTerm = activeKd * dFiltered * 3.0f;
+
+    // Khâu K-Curve: Kích hoạt sớm từ ngưỡng |err| > 2200 (vừa chớm chạm mắt Ch2 hoặc Ch5)
+    // để bánh trong giảm tốc/đảo chiều sớm, chống văng đầu xe ra mép ngoài
     float curveTerm = 0.0f;
-    if (abs(err) > 3500 && kCurve > 0.0f) {
-      float excess = (float)(abs(err) - 3500); // 0 .. 7000
-      float boost = kCurve * (excess * excess) / 3500.0f;
+    long curveThreshold = (long)gParam[P_CURVE_THR];
+    if (abs(err) > curveThreshold && activeKCurve > 0.0f) {
+      float excess = (float)(abs(err) - curveThreshold);
+      float boost = activeKCurve * (excess * excess) / 2800.0f;
       curveTerm = (err > 0) ? boost : -boost;
     }
 
@@ -344,7 +378,7 @@ void loop() {
     static uint32_t lastIdleDispMs = 0;
     if (nowMs - lastIdleDispMs >= 250) {
       lastIdleDispMs = nowMs;
-      displayShowStatus("IDLE", nut2, (int)posPID, sensor);
+      displayShowStatus("IDLE", nut2 / 16, (int)posPID, sensor);
     }
 
     if (sw1Click) {
@@ -364,13 +398,17 @@ void loop() {
       start = 1;
       trangThai = 11;
       pattern = 11;
+      isHighSpeedMode = false;
       RememberLine = 0;
       centerClearCnt = 0;
       lastPos = 0;
       dFiltered = 0.0f;
       cnt = 0;
       cnt1 = 0;
+      straightCnt = 0;
+      brakeHoldCnt = 0;
       speed_run_forward = nut2;
+      currentSpeed = (float)nut2;
       return;
     }
 
@@ -380,13 +418,17 @@ void loop() {
       start = 1;
       trangThai = 11;
       pattern = 11;
+      isHighSpeedMode = true;
       RememberLine = 0;
       centerClearCnt = 0;
       lastPos = 0;
       dFiltered = 0.0f;
       cnt = 0;
       cnt1 = 0;
+      straightCnt = 0;
+      brakeHoldCnt = 0;
       speed_run_forward = nut3;
+      currentSpeed = (float)nut2; // Xuất phát êm từ tốc độ Base
       return;
     }
 
@@ -441,35 +483,49 @@ void loop() {
 }
 
 // =============================================================
-// RUNFORWARDLINE: Bám line + Vượt Nét Đứt + Xoay Góc Vuông 90° Cực Nhanh
+// RUNFORWARDLINE: Chống Overshoot Bằng Phanh Ngược Chủ Động (Plugging Brake)
 // =============================================================
 void runforwardline(int tocdo) {
-  // Tính lực xoay góc vuông dựa trên K-Curve (mặc định mạnh: tiến 3100, lùi -2200; tăng K-Curve sẽ tăng thêm lực xoay)
-  int extraTurn = (int)(kCurve * 40.0f);
-  int pivotFwd  = constrain(2900 + extraTurn, 2400, 4095);
-  int pivotRev  = constrain(2000 + extraTurn, 1400, 3600);
+  static uint32_t lastSpeedStepUs = 0;
+  bool step4ms = false;
+  uint32_t nowUs = micros();
+  if (nowUs - lastSpeedStepUs >= 4000) {
+    lastSpeedStepUs = nowUs;
+    step4ms = true;
+  }
+
+  int extraTurn = (int)(kCurve * 45.0f);
+  int pivotFwd  = constrain(3000 + extraTurn, 2400, 4095);
+  int pivotRev  = constrain(2200 + extraTurn, 1500, 3800);
 
   switch (pattern) {
     case 11: // Đang bám line bình thường
       if (sensor == 0b00000000) {
-        // --- KHI MẤT VẠCH ĐEN (8 MẮT ĐỀU TRẮNG) ---
+        // =========================================================
+        // KHI MẤT VẠCH ĐEN (8 MẮT ĐỀU TRẮNG)
+        // =========================================================
+        // Ở tốc độ cao SW3, nếu trước khi mất vạch xe đã lệch khá xa tâm (|lastPos| >= 4000),
+        // thì chắc chắn xe vừa bị văng khỏi góc cua chứ không phải nét đứt!
+        long dashLimit = (long)gParam[P_DASH_LIM];
 
-        // Trường hợp 1: Đang đi ở vùng giữa (RememberLine == 0 và độ lệch cuối nhỏ)
-        // -> VẠCH NÉT ĐỨT: Lao thẳng qua khoảng trắng
-        if (RememberLine == 0 && abs(lastPos) < 5500) {
+        if (RememberLine == 0 && abs(lastPos) < dashLimit) {
+          // -> VẠCH NÉT ĐỨT: Lao thẳng qua khoảng trắng
           RGB(0);
           if (cnt > 250) { // Quá 1.0 giây không thấy vạch mới -> dừng xe
             trangThai = 100;
             pattern = 100;
           } else {
-            handleAndSpeed(servoPwm / 4, tocdo);
+            int dashSpeed = isHighSpeedMode ? min(tocdo, nut2) : tocdo;
+            handleAndSpeed(servoPwm / 4, dashSpeed);
           }
-        }
-        // Trường hợp 2: Vạch đã quét qua mắt mép ngoài (RememberLine != 0 hoặc lệch lớn)
-        // -> GÓC VUÔNG 90 ĐỘ: Bẻ xoay trục NGAY LẬP TỨC (0ms delay) để không bị lao lố!
-        else {
+        } else {
+          // -> GÓC VUÔNG 90 ĐỘ HOẶC VĂNG CUA: Bẻ xoay trục NGAY LẬP TỨC
           cnt1 = 0;
-          if (RememberLine == 1 || lastPos > 0) {
+          straightCnt = 0;
+          brakeHoldCnt = 0;
+          currentSpeed = (float)min(tocdo, nutCorner);
+
+          if (RememberLine == 1 || (RememberLine == 0 && lastPos > 0)) {
             RememberLine = 1;
             speed_run(pivotFwd, -pivotRev);
             pattern = 21;
@@ -480,18 +536,75 @@ void runforwardline(int tocdo) {
           }
         }
       } else {
-        // --- ĐANG CÓ LINE ---
+        // =========================================================
+        // ĐANG CÓ LINE: KIỂM SOÁT QUÁN TÍNH & PHANH NGƯỢC CHỐNG VĂNG
+        // =========================================================
         cnt = 0;
         RGB(99);
 
-        // Nếu chỉ còn 1-2 mắt ngoài cùng dính line (chớm vào góc vuông), giảm tốc tiến xuống 55%
-        // để lực bẻ lái (servoPwm) làm bánh trong lùi ngay lập tức, giúp xe xoay cực gắt!
-        int curSpeed = tocdo;
-        if (abs(posPID) > 7000) {
-          curSpeed = (tocdo * 55) / 100;
-        } else if (abs(posPID) > 4500) {
-          curSpeed = (tocdo * 75) / 100;
+        // 1. NẾU CHẠY CHẾ ĐỘ SW2 (Tốc độ vừa): Giữ nguyên 100% như cũ
+        if (!isHighSpeedMode) {
+          int curSpeed = tocdo;
+          if (abs(posPID) > 7000) {
+            curSpeed = (tocdo * 55) / 100;
+          } else if (abs(posPID) > 4500) {
+            curSpeed = (tocdo * 75) / 100;
+          }
+          curSpeed -= (int)(fabsf(dFiltered) * gParam[P_DROP]);
+          curSpeed = max(curSpeed, (tocdo * 45) / 100);
+          handleAndSpeed(servoPwm, curSpeed);
+          break;
         }
+
+        // 2. NẾU CHẠY CHẾ ĐỘ SW3 (Tốc độ cao - Boost):
+        long absPos = abs(posPID);
+        float absD  = fabsf(dFiltered);
+
+        if (step4ms) {
+          if (absPos < 1800 && absD < 300.0f) {
+            // Đi thẳng trên tâm line: tích lũy và tăng tốc mượt
+            if (straightCnt < 500) straightCnt++;
+            if (currentSpeed < (float)tocdo) {
+              currentSpeed = min(currentSpeed + gParam[P_ACCEL], (float)tocdo);
+            }
+          } else if (absPos >= (long)gParam[P_BRK_POS]) {
+            // Vào cua thật (line tới Ch2/Ch5 trở ra): phanh nếu đã chạy thẳng đủ lâu
+            if (activeBrakeEn && straightCnt >= (int)gParam[P_BRK_STRAIGHT]) {
+              brakeHoldCnt = (int)gParam[P_BRK_TIME];
+            }
+            straightCnt = 0;
+            currentSpeed = min(currentSpeed, (float)nutCorner);
+          }
+        }
+
+        // Phanh ngược nhẹ (giới hạn lực lái để không xoay xe)
+        if (brakeHoldCnt > 0) {
+          if (step4ms) brakeHoldCnt--;
+          RGB(0);
+          if (gParam[P_BRK_MODE] > 0.5f) {
+            // SHORT: hãm động năng 2 bánh (IN1=IN2=full), không cấp lái
+            cmdSpeed = 0;
+            motors_short_brake();
+          } else {
+            // PLUG: lùi nền + lái giới hạn
+            int brkSteer = (int)gParam[P_BRK_STEER];
+            handleAndSpeed(constrain(servoPwm, -brkSteer, brkSteer), -(int)gParam[P_BRK_BASE]);
+          }
+          break;
+        }
+
+        // Giảm tốc liên tục từ lệch 1600 -> 4500 về nutCorner (không nấc)
+        int curSpeed = (int)currentSpeed;
+        if (absPos > 1600) {
+          float k = constrain((absPos - 1600) / 2900.0f, 0.0f, 1.0f);
+          curSpeed = (int)((float)curSpeed + ((float)nutCorner - (float)curSpeed) * k);
+        }
+        // Mép ngoài: giảm sâu nhưng không về 0
+        if (absPos > 6000) curSpeed = (nutCorner * 60) / 100;
+
+        // Line trượt càng nhanh (|dFiltered| lớn) càng giảm tốc sớm
+        curSpeed -= (int)(absD * gParam[P_DROP]);
+        curSpeed = constrain(curSpeed, nutCorner / 2, 4095);
         handleAndSpeed(servoPwm, curSpeed);
       }
       break;
@@ -506,12 +619,14 @@ void runforwardline(int tocdo) {
       speed_run(pivotFwd, -pivotRev);
 
       // Đợi cho đến khi vạch đen đi vào các mắt gần tâm (Ch2..Ch5: 0b00111100) mới thoát xoay
-      // Giúp xe xoay đủ 90 độ, không bị thoát xoay sớm khi mới chạm mép Ch7!
       if (sensorMask(0b00111100) != 0) {
-        lastPos = 2500;
+        lastPos = 2200;
         dFiltered = 0.0f;
         RememberLine = 0;
         centerClearCnt = 0;
+        straightCnt = 0;
+        brakeHoldCnt = 0;
+        currentSpeed = (float)nutCorner; // Thoát góc vuông ở tốc độ Corner để không văng sang phía bên kia
         pattern = 11;
         cnt = 0;
       }
@@ -528,10 +643,13 @@ void runforwardline(int tocdo) {
 
       // Đợi cho đến khi vạch đen đi vào các mắt gần tâm (Ch2..Ch5: 0b00111100) mới thoát xoay
       if (sensorMask(0b00111100) != 0) {
-        lastPos = -2500;
+        lastPos = -2200;
         dFiltered = 0.0f;
         RememberLine = 0;
         centerClearCnt = 0;
+        straightCnt = 0;
+        brakeHoldCnt = 0;
+        currentSpeed = (float)nutCorner; // Thoát góc vuông ở tốc độ Corner để không văng sang phía bên kia
         pattern = 11;
         cnt = 0;
       }
@@ -606,7 +724,15 @@ void readEeprom() {
 // =============================================================
 // MOTOR DRIVER (DRV8871 H-Bridge 4 kênh PWM, 12-bit: -4095..4095)
 // =============================================================
+void motors_short_brake() {
+  ledcWrite(LEDC_CH_LEFT_IN1,  4095);
+  ledcWrite(LEDC_CH_LEFT_IN2,  4095);
+  ledcWrite(LEDC_CH_RIGHT_IN1, 4095);
+  ledcWrite(LEDC_CH_RIGHT_IN2, 4095);
+}
+
 void handleAndSpeed(int angle, int speed1) {
+  cmdSpeed = speed1;
   int speedLeft  = speed1 + angle;
   int speedRight = speed1 - angle;
 
