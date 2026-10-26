@@ -1,5 +1,6 @@
 #include "display.h"
 #include "config.h"
+#include "params.h"
 #include <Wire.h>
 #include <U8g2lib.h>
 #include <Preferences.h>
@@ -10,22 +11,18 @@ static U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NON
 static U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ PIN_I2C_SCL, /* data=*/ PIN_I2C_SDA);
 #endif
 
-extern volatile float kp;
-extern volatile float kd;
-extern volatile float kCurve;
-extern volatile bool activeBrakeEn;
-extern int nut2;
-extern int nut3;
-extern int nutCorner;
-
-// Giá trị hiện hành (main.cpp đọc trực tiếp)
-float gParam[P_COUNT];
-
 // ------------------------------------------------------------
-// Bảng định nghĩa tham số: tên, mặc định, min, max, bước, số lẻ (255 = ON/OFF)
+// Bảng định nghĩa 10 tham số cốt lõi trên Menu OLED:
+// Tên, Mặc định, Min, Max, Bước chỉnh, Số chữ số thập phân (253 = Hiển thị % hoặc OFF)
+// Đã sửa Min để phản ánh chính xác dải điều khiển PWM phần cứng:
+// - Bst: min 80 (x16 = 1280 PWM)
+// - Base: min 70 (x16 = 1120 PWM)
+// - Cnr: min 85 (x16 = 1360 PWM > sàn minTorqueFloor 1350)
 // ------------------------------------------------------------
-#define BOOL_DEC 255
-#define MODE_DEC 254   // 2 trạng thái: PLUG / SHORT
+#define PCT_DEC 253
+#define ONOFF_DEC 254
+#define PREFS_SCHEMA_VER 6
+
 struct ParamDef {
   const char *name;
   float def, mn, mx, step;
@@ -33,30 +30,16 @@ struct ParamDef {
 };
 
 static const ParamDef PDEF[P_COUNT] = {
-  {"Bst Spd",  175.0f,   50.0f, 255.0f,   5.0f, 0},   // P_BOOST
-  {"Base Spd", 125.0f,   40.0f, 255.0f,   5.0f, 0},   // P_BASE
-  {"Cnr Spd",   90.0f,   30.0f, 255.0f,   5.0f, 0},   // P_CORNER
-  {"Kp Gain",   15.0f,    0.0f,  50.0f,   0.5f, 1},   // P_KP
-  {"Kd Gain",   55.0f,    0.0f, 150.0f,   2.0f, 0},   // P_KD
-  {"K-Curve",    5.0f,    0.0f,  30.0f,   1.0f, 1},   // P_KCURVE
-  {"ABS Brk",    1.0f,    0.0f,   1.0f,   1.0f, BOOL_DEC}, // P_ABS
-  {"Ref Spd",  135.0f,   40.0f, 255.0f,   5.0f, 0},   // P_REF_SPD
-  {"Kp Slope",   0.25f,   0.0f,   1.0f,   0.05f, 2},  // P_KP_SLOPE
-  {"Kd Slope",   0.60f,   0.0f,   3.0f,   0.10f, 2},  // P_KD_SLOPE
-  {"Drop Gn",    0.0f,    0.0f,   5.0f,   0.5f, 1},   // P_DROP
-  {"Accel",     25.0f,    1.0f, 100.0f,   5.0f, 0},   // P_ACCEL
-  {"Crv Thr", 3200.0f, 1000.0f, 8000.0f, 100.0f, 0},  // P_CURVE_THR
-  {"Dash Lim",5500.0f, 2000.0f,10000.0f, 250.0f, 0},  // P_DASH_LIM
-  {"Brk Strt",  50.0f,    0.0f, 300.0f,   5.0f, 0},   // P_BRK_STRAIGHT
-  {"Brk Pos", 3500.0f, 1500.0f, 8000.0f, 100.0f, 0},  // P_BRK_POS
-  {"Brk Base", 600.0f,    0.0f, 2000.0f, 100.0f, 0},  // P_BRK_BASE
-  {"Brk Strg",1500.0f,    0.0f, 4000.0f, 100.0f, 0},  // P_BRK_STEER
-  {"SW3 Kp",     1.0f,    0.5f,   2.0f,   0.05f, 2},  // P_SW3_KP
-  {"SW3 Kd",     1.0f,    0.5f,   2.5f,   0.05f, 2},  // P_SW3_KD
-  {"SW3 Kc",     1.0f,    0.5f,   3.0f,   0.10f, 1},  // P_SW3_KC
-  {"Brk Time",  10.0f,    3.0f,  40.0f,   1.0f, 0},   // P_BRK_TIME
-  {"Brk Mode",   1.0f,    0.0f,   1.0f,   1.0f, MODE_DEC}, // P_BRK_MODE
-  {"Vest Dcy",   0.02f,   0.005f, 0.10f,  0.005f, 3}, // P_VEST_DCY
+  {"Bst Spd",  240.0f,   80.0f, 255.0f,   5.0f, 0},       // P_BOOST   : Tốc độ tối đa SW3
+  {"Base Spd", 145.0f,   70.0f, 255.0f,   5.0f, 0},       // P_BASE    : Tốc độ chuẩn SW2
+  {"Cnr Spd",   95.0f,   85.0f, 220.0f,   5.0f, 0},       // P_CORNER  : Tốc độ ôm cua
+  {"Kp Gain",   15.0f,    1.0f,  50.0f,   0.5f, 1},       // P_KP      : Hệ số lái P
+  {"Kd Gain",   60.0f,    0.0f, 150.0f,   2.0f, 0},       // P_KD      : Hệ số dập dao động D
+  {"K-Curve",    6.5f,    0.0f,  30.0f,   0.5f, 1},       // P_KCURVE  : Tăng lực cua gắt & xoay 90°
+  {"Accel",     30.0f,    5.0f, 100.0f,   5.0f, 0},       // P_ACCEL   : Gia tốc đường thẳng mỗi 4ms
+  {"Brk Pwr",   80.0f,    0.0f, 100.0f,   5.0f, PCT_DEC}, // P_BRK_PWR : Cường độ phanh (0%=OFF, 80%=Chuẩn)
+  {"Brk Pos", 2600.0f, 1500.0f, 6000.0f, 100.0f, 0},      // P_BRK_POS : Ngưỡng lệch vạch kích hoạt phanh
+  {"W-Loop",     1.0f,    0.0f,   1.0f,   1.0f, ONOFF_DEC} // P_WLOOP  : Vòng lặp kín vận tốc bánh xe
 };
 
 static const int N_ACTIONS  = 4;
@@ -69,66 +52,46 @@ static const char *ACTION_NAME[N_ACTIONS] = {
   "[SAVE & EXIT]", "[CANCEL]", "[RESTORE DEF]", "[TEST HOLD]"
 };
 
-static float mCfg[P_COUNT];   // bản đang chỉnh trong menu
+static float mCfg[P_COUNT];   // Bản đang chỉnh trong Menu
 static bool s_inMenu = false;
 static int  s_menuIndex = 0;
 static bool s_menuEdit = false;
 static bool s_testHold = false;
 
 static void setDefaults() {
-  for (int i = 0; i < P_COUNT; i++) mCfg[i] = PDEF[i].def;
+  for (int i = 0; i < P_COUNT; i++) {
+    mCfg[i] = PDEF[i].def;
+  }
 }
 
-// Đẩy mCfg -> gParam và các biến cũ của main.cpp
-static void syncToMain() {
-  for (int i = 0; i < P_COUNT; i++) gParam[i] = mCfg[i];
-  kp = gParam[P_KP];
-  kd = gParam[P_KD];
-  kCurve = gParam[P_KCURVE];
-  activeBrakeEn = (gParam[P_ABS] > 0.5f);
-  nut2      = constrain((int)(gParam[P_BASE]   * 16.0f), 800, 4095);
-  nut3      = constrain((int)(gParam[P_BOOST]  * 16.0f), 1000, 4095);
-  nutCorner = constrain((int)(gParam[P_CORNER] * 16.0f), 600, 4095);
-}
-
-static bool isToggle(int idx) {
-  return PDEF[idx].dec == BOOL_DEC || PDEF[idx].dec == MODE_DEC;
+static void syncToParams() {
+  for (int i = 0; i < P_COUNT; i++) {
+    gMenuParams[i] = constrain(mCfg[i], PDEF[i].mn, PDEF[i].mx);
+  }
+  paramsSyncFromMenu();
 }
 
 static void stepParam(int idx, int dir) {
   const ParamDef &d = PDEF[idx];
-  if (isToggle(idx)) {
-    mCfg[idx] = (mCfg[idx] > 0.5f) ? 0.0f : 1.0f;
-    return;
-  }
   float v = mCfg[idx] + dir * d.step;
   v = constrain(v, d.mn, d.mx);
-  v = roundf(v / d.step) * d.step;      // chống trôi số thực
+  v = roundf(v / d.step) * d.step;
   mCfg[idx] = constrain(v, d.mn, d.mx);
 }
 
 static void formatValue(int idx, char *out, size_t n) {
   const ParamDef &d = PDEF[idx];
-  if (d.dec == BOOL_DEC) snprintf(out, n, "%s", mCfg[idx] > 0.5f ? "ON" : "OFF");
-  else if (d.dec == MODE_DEC) snprintf(out, n, "%s", mCfg[idx] > 0.5f ? "SHORT" : "PLUG");
-  else snprintf(out, n, "%.*f", (int)d.dec, mCfg[idx]);
-}
-
-static void loadPrefs() {
-  setDefaults();
-  Preferences p;
-  if (p.begin("menu2", true)) {
-    if (p.isKey("ver")) {
-      char key[8];
-      for (int i = 0; i < P_COUNT; i++) {
-        snprintf(key, sizeof(key), "v%d", i);
-        float v = p.getFloat(key, PDEF[i].def);
-        mCfg[i] = constrain(v, PDEF[i].mn, PDEF[i].mx);
-      }
+  if (d.dec == PCT_DEC) {
+    if (mCfg[idx] < 5.0f) {
+      snprintf(out, n, "OFF");
+    } else {
+      snprintf(out, n, "%.0f%%", mCfg[idx]);
     }
-    p.end();
+  } else if (d.dec == ONOFF_DEC) {
+    snprintf(out, n, (mCfg[idx] >= 0.5f) ? "ON" : "OFF");
+  } else {
+    snprintf(out, n, "%.*f", (int)d.dec, mCfg[idx]);
   }
-  syncToMain();
 }
 
 static void savePrefs() {
@@ -139,9 +102,43 @@ static void savePrefs() {
     snprintf(key, sizeof(key), "v%d", i);
     p.putFloat(key, mCfg[i]);
   }
-  p.putUChar("ver", 1);
+  p.putUChar("ver", PREFS_SCHEMA_VER);
   p.end();
-  syncToMain();
+  syncToParams();
+}
+
+static void loadPrefs() {
+  setDefaults();
+  Preferences p;
+  bool needSave = false;
+  if (p.begin("menu2", true)) {
+    uint8_t ver = p.getUChar("ver", 0);
+    char key[8];
+    if (ver == PREFS_SCHEMA_VER) {
+      for (int i = 0; i < P_COUNT; i++) {
+        snprintf(key, sizeof(key), "v%d", i);
+        float v = p.getFloat(key, PDEF[i].def);
+        mCfg[i] = constrain(v, PDEF[i].mn, PDEF[i].mx);
+      }
+    } else if (ver == 5) {
+      // Migration 5 -> 6: giữ nguyên 9 thông số đã tuning, thêm W-Loop mặc định ON
+      for (int i = 0; i < P_WLOOP; i++) {
+        snprintf(key, sizeof(key), "v%d", i);
+        float v = p.getFloat(key, PDEF[i].def);
+        mCfg[i] = constrain(v, PDEF[i].mn, PDEF[i].mx);
+      }
+      mCfg[P_WLOOP] = PDEF[P_WLOOP].def;
+      needSave = true;
+    }
+    p.end();
+  } else {
+    needSave = true;
+  }
+  if (needSave) {
+    savePrefs();
+  } else {
+    syncToParams();
+  }
 }
 
 void displayInit() {
@@ -154,8 +151,8 @@ void displayInit() {
 }
 
 void displayMenuLoop() {
-  const uint32_t REPEAT_DELAY_MS = 400;   // giữ nút > 400ms bắt đầu lặp
-  const uint32_t HOLD_FAST_MS    = 1500;  // giữ > 1.5s: bước x5 (khi đang sửa)
+  const uint32_t REPEAT_DELAY_MS = 400;
+  const uint32_t HOLD_FAST_MS    = 1500;
 
   s_inMenu = true;
   s_menuEdit = false;
@@ -192,7 +189,7 @@ void displayMenuLoop() {
       if (!s_menuEdit) {
         s_menuIndex = (s_menuIndex + N_ITEMS - 1) % N_ITEMS;
       } else if (s_menuIndex < P_COUNT) {
-        if (!isToggle(s_menuIndex) || first1) stepParam(s_menuIndex, +mult1);
+        stepParam(s_menuIndex, +mult1);
       }
     }
     if (fire2) {
@@ -200,7 +197,7 @@ void displayMenuLoop() {
       if (!s_menuEdit) {
         s_menuIndex = (s_menuIndex + 1) % N_ITEMS;
       } else if (s_menuIndex < P_COUNT) {
-        if (!isToggle(s_menuIndex) || first2) stepParam(s_menuIndex, -mult2);
+        stepParam(s_menuIndex, -mult2);
       }
     }
 
@@ -220,7 +217,7 @@ void displayMenuLoop() {
         setDefaults();
         savePrefs();
       } else if (s_menuIndex == IDX_TEST) {
-        syncToMain();
+        syncToParams();
         s_testHold = true;
         s_inMenu = false;
       }
@@ -262,6 +259,14 @@ void displayMenuLoop() {
       u8g2.sendBuffer();
     }
     delay(25);
+  }
+
+  uint32_t releaseWait = millis();
+  while ((digitalRead(PIN_BTN_SW1) == LOW ||
+          digitalRead(PIN_BTN_SW2) == LOW ||
+          digitalRead(PIN_BTN_SW3) == LOW) &&
+         (millis() - releaseWait < 500)) {
+    delay(10);
   }
 }
 

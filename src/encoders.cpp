@@ -17,7 +17,9 @@ static const int8_t QUAD_TABLE[16] = {
      0,  1, -1,  0
 };
 
-static const int N = 5;
+// Cửa sổ trượt 6 mẫu: encodersUpdateSpeed() được gọi mỗi 2ms -> cửa sổ 12ms
+// (giữ nguyên cửa sổ 12ms như bản cũ 3 mẫu x 4ms, tránh nhiễu lượng tử hóa tick)
+static const int N = 6;
 static uint32_t histT[N] = {0};
 static int32_t histL[N] = {0};
 static int32_t histR[N] = {0};
@@ -26,15 +28,10 @@ static int hIdx = 0;
 static float leftSpeedMmS = 0.0f;
 static float rightSpeedMmS = 0.0f;
 
-// Distance per 4x quadrature tick MM_PER_TICK is defined in config.h (~0.7768 mm per tick)
-
 static volatile uint32_t lastLeftEdgeUs = 0;
 static volatile uint32_t lastRightEdgeUs = 0;
 
-// ISR chạy cực nhanh bằng cách đọc trực tiếp thanh ghi GPIO.in1.data của ESP32 (~15ns)
-// GPIO 32 -> bit 0, GPIO 33 -> bit 1, GPIO 34 -> bit 2, GPIO 35 -> bit 3
-// Lọc nhiễu chặt chẽ: Chỉ cập nhật trạng thái khi bước chuyển Gray hợp lệ (step != 0).
-// Bỏ qua và triệt tiêu 100% xung nhiễu nhọn từ PWM động cơ nhảy 2 bit cùng lúc!
+// ISR ngắt đọc thanh ghi GPIO.in1.data trực tiếp (~15ns)
 void IRAM_ATTR isrLeftEncoder() {
     uint32_t gpio = GPIO.in1.data;
     uint8_t curr = gpio & 0x03; // Bits 0 and 1 (GPIO 32, 33)
@@ -48,8 +45,9 @@ void IRAM_ATTR isrLeftEncoder() {
         leftTicks += step;
 #endif
         lastLeftEdgeUs = micros();
-        lastLeftState = curr;
     }
+    // Cập nhật lastLeftState ngay cả khi step == 0 (glitch 2-bit) để tái đồng bộ ngay lập tức
+    lastLeftState = curr;
 }
 
 void IRAM_ATTR isrRightEncoder() {
@@ -65,24 +63,23 @@ void IRAM_ATTR isrRightEncoder() {
         rightTicks += step;
 #endif
         lastRightEdgeUs = micros();
-        lastRightState = curr;
     }
+    // Cập nhật lastRightState ngay cả khi step == 0 (glitch 2-bit) để tái đồng bộ ngay lập tức
+    lastRightState = curr;
 }
 
 void encodersInit() {
     pinMode(PIN_ENC_LEFT_A, INPUT_PULLUP);
     pinMode(PIN_ENC_LEFT_B, INPUT_PULLUP);
 
-    // GPIO 34 & 35 are input-only pins on ESP32 (require external pull-ups)
+    // GPIO 34 & 35 là input-only (cần trở kéo ngoài 4.7k - 10k lên 3.3V)
     pinMode(PIN_ENC_RIGHT_A, INPUT);
     pinMode(PIN_ENC_RIGHT_B, INPUT);
 
-    // Khởi tạo trạng thái ban đầu của encoder
     uint32_t gpio = GPIO.in1.data;
     lastLeftState = gpio & 0x03;
     lastRightState = (gpio >> 2) & 0x03;
 
-    // Ngắt 4x giải mã quadrature: bắt cả hai sườn (CHANGE) trên cả 2 kênh A & B
     attachInterrupt(digitalPinToInterrupt(PIN_ENC_LEFT_A), isrLeftEncoder, CHANGE);
     attachInterrupt(digitalPinToInterrupt(PIN_ENC_LEFT_B), isrLeftEncoder, CHANGE);
     attachInterrupt(digitalPinToInterrupt(PIN_ENC_RIGHT_A), isrRightEncoder, CHANGE);
@@ -152,19 +149,16 @@ void encodersUpdateSpeed() {
 
     if (t0 == 0) return;
     float dt = (float)(t - t0) * 1e-6f;
-    if (dt < 0.005f) return;
+    if (dt < 0.003f) return;
 
     float rawSpeedL = (float)(cl - l0) * MM_PER_TICK / dt;
     float rawSpeedR = (float)(cr - r0) * MM_PER_TICK / dt;
 
-    // Nếu không có xung cạnh nào trong 40ms (> 0.04s, tương đương tốc độ < 20 mm/s),
-    // kết luận bánh xe đã dừng hẳn hoặc đổi chiều, xả tốc độ về 0 ngay lập tức:
-    if (t - lastLEdge > 40000) rawSpeedL = 0.0f;
-    if (t - lastREdge > 40000) rawSpeedR = 0.0f;
+    if (t - lastLEdge > 30000) rawSpeedL = 0.0f;
+    if (t - lastREdge > 30000) rawSpeedR = 0.0f;
 
-    // Bộ lọc thông thấp EMA (alpha = 0.45): triệt tiêu hoàn toàn rung lượng tử hóa
-    leftSpeedMmS  = 0.45f * rawSpeedL + 0.55f * leftSpeedMmS;
-    rightSpeedMmS = 0.45f * rawSpeedR + 0.55f * rightSpeedMmS;
+    leftSpeedMmS  = 0.65f * rawSpeedL + 0.35f * leftSpeedMmS;
+    rightSpeedMmS = 0.65f * rawSpeedR + 0.35f * rightSpeedMmS;
 }
 
 float encodersGetLeftSpeedMmS() {
@@ -174,5 +168,3 @@ float encodersGetLeftSpeedMmS() {
 float encodersGetRightSpeedMmS() {
     return rightSpeedMmS;
 }
-
-
